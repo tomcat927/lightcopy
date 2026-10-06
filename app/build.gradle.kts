@@ -69,6 +69,8 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0")
+    // Root 保活：周期巡检/解绑后一次性恢复
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
     // 热更新：检查/下载/校验均走 OkHttp
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 

@@ -30,4 +30,11 @@
     <string name="main_version_label">轻复制 v%1$s</string>
     <string name="main_check_update">检查更新</string>
     <string name="main_checking">检查中…</string>
+
+    <string name="keepalive_title">Root 保活</string>
+    <string name="keepalive_desc_on">保活中：无障碍服务被关闭时自动恢复（每 15 分钟巡检）</string>
+    <string name="keepalive_desc_off">开启后将请求 root 权限，在无障碍服务被关闭时自动恢复</string>
+    <string name="toast_keepalive_on">已开启 Root 保活</string>
+    <string name="toast_keepalive_no_root">未获得 root 授权，保活未开启</string>
+    <string name="toast_keepalive_recovered">无障碍服务已自动恢复</string>
 </resources>

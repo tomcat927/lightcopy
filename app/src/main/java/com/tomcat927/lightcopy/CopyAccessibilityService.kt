@@ -3,11 +3,13 @@ package com.tomcat927.lightcopy
 import android.accessibilityservice.AccessibilityService
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
@@ -26,6 +28,18 @@ class CopyAccessibilityService : AccessibilityService() {
         @Volatile
         var instance: CopyAccessibilityService? = null
             private set
+
+        /** 本服务当前是否处于系统无障碍开关开启状态（兼容完整/短两种组件写法） */
+        fun isSelfEnabled(context: Context): Boolean {
+            val enabled = Settings.Secure.getString(
+                context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            ) ?: return false
+            val cn = ComponentName(context, CopyAccessibilityService::class.java)
+            return enabled.split(':').any {
+                it.equals(cn.flattenToShortString(), ignoreCase = true) ||
+                    it.equals(cn.flattenToString(), ignoreCase = true)
+            }
+        }
     }
 
     private var overlay: CopyModeOverlay? = null
@@ -42,6 +56,8 @@ class CopyAccessibilityService : AccessibilityService() {
 
     override fun onUnbind(intent: Intent?): Boolean {
         teardown()
+        // 保活开启时排一个 20 秒后的一次性恢复：开关被 ROM 翻掉能在进程存活期间拉回
+        RootKeeper.onServiceUnbound(this)
         return super.onUnbind(intent)
     }
 
