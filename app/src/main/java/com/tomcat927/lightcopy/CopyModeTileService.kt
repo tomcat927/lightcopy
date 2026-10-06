@@ -7,7 +7,6 @@ import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Icon
 import android.os.Build
-import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
@@ -15,7 +14,6 @@ import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.util.Log
 import android.widget.Toast
-import androidx.fragment.app.DialogFragment
 
 /**
  * 快捷设置瓦片「复制模式」：用户习惯的触发入口。
@@ -73,32 +71,25 @@ class CopyModeTileService : TileService() {
 
     /**
      * 先折叠 QS 面板再进选择模式：
-     * - API 31+：showDialog + 立即 dismiss —— showDialog 会让系统收起面板，空对话框随即撤掉
+     * - API 31+：showDialog(Dialog) 是官方 API，文档行为即「收起 QS 面板并显示对话框」；
+     *   配一个透明空对话框，显示后立即 dismiss，面板收掉了也不留可见痕迹
      * - S 以下：发 ACTION_CLOSE_SYSTEM_DIALOGS 广播（API 31 起该广播受限，走上面的路）
      */
     private fun collapseQsPanel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            runCatching { showDialog(PanelCollapseFragment()) }
-                .onFailure { Log.w(TAG, "collapse via showDialog failed", it) }
+            runCatching {
+                val dialog = Dialog(this).apply {
+                    window?.apply {
+                        setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+                        setDimAmount(0f)
+                    }
+                }
+                showDialog(dialog)
+                // dialog.show 内部是 post 到主线程的，紧随其后 post dismiss 保证 show 先执行
+                Handler(Looper.getMainLooper()).post { dialog.dismiss() }
+            }.onFailure { Log.w(TAG, "collapse via showDialog failed", it) }
         } else {
             runCatching { sendBroadcast(Intent(Intent.ACTION_CLOSE_SYSTEM_DIALOGS)) }
-        }
-    }
-
-    /** 空对话框：透明无阴影，显示后立即自行关闭，不留可见痕迹 */
-    private class PanelCollapseFragment : DialogFragment() {
-        override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
-            val dialog = super.onCreateDialog(savedInstanceState)
-            dialog.window?.apply {
-                setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-                setDimAmount(0f)
-            }
-            return dialog
-        }
-
-        override fun onStart() {
-            super.onStart()
-            dismissAllowingStateLoss()
         }
     }
 }

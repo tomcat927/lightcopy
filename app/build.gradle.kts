@@ -68,8 +68,6 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-compose:1.9.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
-    // 瓦片折叠 QS 面板的 showDialog hack 需要 DialogFragment（activity 不反向依赖 fragment）
-    implementation("androidx.fragment:fragment-ktx:1.7.1")
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
