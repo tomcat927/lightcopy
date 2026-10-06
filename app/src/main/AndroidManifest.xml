@@ -3,6 +3,9 @@
 
     <!-- 悬浮层回落 TYPE_APPLICATION_OVERLAY 时需要；正常路径走免权限的 TYPE_ACCESSIBILITY_OVERLAY -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- 热更新：仅「检查更新」时联网 + 下载 APK 后调起系统安装器 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:allowBackup="true"
@@ -46,6 +49,16 @@
                 <action android:name="android.service.quicksettings.TileService" />
             </intent-filter>
         </service>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>

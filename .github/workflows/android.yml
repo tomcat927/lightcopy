@@ -106,6 +106,24 @@ jobs:
 
           GITHUB_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${APK_NAME}"
           PROXY_URL="https://gh-proxy.com/${GITHUB_URL}"
+          GITHUB_CHECKSUM_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${CHECKSUM_NAME}"
+          PROXY_CHECKSUM_URL="https://gh-proxy.com/${GITHUB_CHECKSUM_URL}"
+          RELEASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+
+          # 热更新清单：App 内「检查更新」读取（version_code 为构建时间戳，单调递增）
+          cat > latest.json <<EOF
+          {
+            "tag_name": "${TAG}",
+            "version_display": "${APP_VERSION} (${DISPLAY})",
+            "version_code": ${{ steps.version.outputs.code }},
+            "apk": "${PROXY_URL}",
+            "github_apk": "${GITHUB_URL}",
+            "apk_sha256": "${PROXY_CHECKSUM_URL}",
+            "github_apk_sha256": "${GITHUB_CHECKSUM_URL}",
+            "release_url": "${RELEASE_URL}",
+            "release_notes": "更新包优先通过 GitHub 代理下载，校验通过后启动系统安装器。"
+          }
+          EOF
 
           cat > release-notes.md <<EOF
           ## 版本
@@ -127,6 +145,8 @@ jobs:
 
           - 文件：\`${APK_NAME}\`
           - SHA-256：见 \`${CHECKSUM_NAME}\`
+
+          App 内「检查更新」可自动下载并校验安装；如加速地址不可用会自动切换 GitHub 原始地址。
           EOF
 
           echo "apk=${APK_NAME}" >> "$GITHUB_OUTPUT"
@@ -145,7 +165,7 @@ jobs:
           gh release create "$TAG" \
             --title "$TAG" \
             --notes-file release-notes.md \
-            lightcopy-"$TAG".apk lightcopy-"$TAG".apk.sha256
+            lightcopy-"$TAG".apk lightcopy-"$TAG".apk.sha256 latest.json
 
       - name: Cleanup old releases (keep 10)
         if: github.event_name != 'pull_request'
