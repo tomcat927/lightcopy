@@ -1,0 +1,18 @@
+*.iml
+.gradle/
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+/app/build
+
+# 签名密钥：仅本地备份 + GitHub Secrets，严禁提交
+signing/
+signing.properties
+*.jks
+*.keystore
+*.p12

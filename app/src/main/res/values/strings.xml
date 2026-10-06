@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">轻复制</string>
+    <string name="tile_label">复制模式</string>
+    <string name="clip_label">轻复制</string>
+
+    <string name="a11y_service_summary">点按复制屏幕文本</string>
+    <string name="a11y_service_description">轻复制的核心服务：读取当前屏幕上的文本并显示为可点击的文本块，点按即可复制到剪贴板。不截屏、不联网、不上传任何数据。</string>
+
+    <string name="btn_copy_all">复制全部</string>
+    <string name="btn_close">关闭</string>
+
+    <string name="toast_copied">已复制：%1$s</string>
+    <string name="toast_copied_all">已复制全部文本（共 %1$d 段）</string>
+    <string name="toast_no_text">屏幕上没有找到可复制的文本</string>
+    <string name="toast_overlay_failed">无法显示悬浮层，请关闭后重新开启无障碍服务再试</string>
+    <string name="toast_enable_a11y_first">请先开启「轻复制」的无障碍服务</string>
+
+    <string name="main_status_on">无障碍服务已开启</string>
+    <string name="main_status_on_sub">下拉通知栏，点「复制模式」即可开始</string>
+    <string name="main_status_off">无障碍服务未开启</string>
+    <string name="main_status_off_sub">本应用需要无障碍权限读取屏幕文本，全程离线、不上传任何数据</string>
+    <string name="main_btn_open_settings">去开启无障碍服务</string>
+    <string name="main_restricted_hint">若开启时提示「受限设置」：设置 → 应用 → 轻复制 → 右上角三个点 → 允许受限设置</string>
+    <string name="main_how_title">使用说明</string>
+    <string name="main_how_1">1. 下拉通知栏，点按「复制模式」快捷瓦片，屏幕文本会被圆角框逐块标出。</string>
+    <string name="main_how_2">2. 点任意文本块即可复制，随后自动退出并回到原应用。</string>
+    <string name="main_how_3">3. 底部工具条提供「复制全部」；按返回键、点空白处或等 30 秒也会退出。</string>
+    <string name="main_note">不联网、不截屏、无任何设置项 —— 一切只在本机完成。</string>
+</resources>
