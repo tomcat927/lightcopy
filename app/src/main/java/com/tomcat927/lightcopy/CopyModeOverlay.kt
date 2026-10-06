@@ -41,7 +41,7 @@ class CopyModeOverlay(
         private const val SCRIM_COLOR = 0x28000000
         private const val BLOCK_FILL_COLOR = 0x18FFFFFF
         private const val BLOCK_STROKE_COLOR = 0x44FFFFFF
-        private const val TOOLBAR_BG_COLOR = 0xE6212124
+        private val TOOLBAR_BG_COLOR = 0xE6212124.toInt()
         private const val BUTTON_BG_COLOR = 0x33FFFFFF
     }
 
