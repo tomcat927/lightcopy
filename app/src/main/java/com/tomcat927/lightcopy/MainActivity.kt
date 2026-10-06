@@ -2,6 +2,7 @@ package com.tomcat927.lightcopy
 
 import android.content.ComponentName
 import android.content.Intent
+import android.app.StatusBarManager
 import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Bundle
@@ -91,28 +92,8 @@ class MainActivity : ComponentActivity() {
             val scope = rememberCoroutineScope()
             val appContext = applicationContext
 
-            // 一键把「复制模式」瓦片加进快捷设置面板（Android 13+ 系统弹窗；以下引导手动）
-            val onAddTile: () -> Unit = {
-                if (Build.VERSION.SDK_INT >= 33) {
-                    TileService.requestAddTileService(
-                        ComponentName(this@MainActivity, CopyModeTileService::class.java),
-                        getString(R.string.tile_label),
-                        Icon.createWithResource(appContext, R.drawable.ic_tile),
-                        ContextCompat.getMainExecutor(this@MainActivity),
-                    ) { result ->
-                        when (result) {
-                            TileService.TILE_ADD_REQUEST_SUCCESS ->
-                                Toast.makeText(appContext, R.string.toast_tile_added, Toast.LENGTH_SHORT).show()
-                            TileService.TILE_ADD_REQUEST_ALREADY_ADDED ->
-                                Toast.makeText(appContext, R.string.toast_tile_already, Toast.LENGTH_SHORT).show()
-                            else ->
-                                Toast.makeText(appContext, R.string.toast_tile_manual, Toast.LENGTH_LONG).show()
-                        }
-                    }
-                } else {
-                    Toast.makeText(appContext, R.string.toast_tile_manual, Toast.LENGTH_LONG).show()
-                }
-            }
+            // 一键把「复制模式」瓦片加进快捷设置面板（Android 13+ 系统弹窗；失败/低版本引导手动）
+            val onAddTile: () -> Unit = { requestAddTile() }
 
             val onKeepAliveToggle: (Boolean) -> Unit = { want ->
                 if (!keepAliveBusy) {
@@ -161,6 +142,52 @@ class MainActivity : ComponentActivity() {
 
     private fun isAccessibilityServiceEnabled(): Boolean =
         CopyAccessibilityService.isSelfEnabled(this)
+
+    /**
+     * 一键添加瓦片：requestAddTileService 是 SystemApi（编译期不可见、运行期存在），
+     * 反射调用 TileService / StatusBarManager 两个落点；任何失败退回手动添加引导。
+     * 结果码为 TileService.TILE_ADD_REQUEST_* 的隐藏常量值：3=SUCCESS，2=ALREADY_ADDED。
+     */
+    private fun requestAddTile() {
+        if (Build.VERSION.SDK_INT < 33) {
+            Toast.makeText(applicationContext, R.string.toast_tile_manual, Toast.LENGTH_LONG).show()
+            return
+        }
+        val componentName = ComponentName(this, CopyModeTileService::class.java)
+        val label = getString(R.string.tile_label)
+        val icon = Icon.createWithResource(applicationContext, R.drawable.ic_tile)
+        val executor = ContextCompat.getMainExecutor(this)
+        val consumer = java.util.function.Consumer<Int> { result ->
+            val msgRes = when (result) {
+                3 -> R.string.toast_tile_added
+                2 -> R.string.toast_tile_already
+                else -> R.string.toast_tile_manual
+            }
+            Toast.makeText(applicationContext, msgRes, Toast.LENGTH_LONG).show()
+        }
+        val paramTypes = arrayOf(
+            ComponentName::class.java,
+            CharSequence::class.java,
+            Icon::class.java,
+            java.util.concurrent.Executor::class.java,
+            java.util.function.Consumer::class.java,
+        )
+        val invoked = runCatching {
+            val method = runCatching {
+                TileService::class.java.getMethod("requestAddTileService", *paramTypes)
+            }.getOrElse {
+                StatusBarManager::class.java.getMethod("requestAddTileService", *paramTypes)
+            }
+            if (method.declaringClass == TileService::class.java) {
+                method.invoke(null, componentName, label, icon, executor, consumer)
+            } else {
+                method.invoke(getSystemService(StatusBarManager::class.java), componentName, label, icon, executor, consumer)
+            }
+        }
+        if (invoked.isFailure) {
+            Toast.makeText(applicationContext, R.string.toast_tile_manual, Toast.LENGTH_LONG).show()
+        }
+    }
 }
 
 @Composable
