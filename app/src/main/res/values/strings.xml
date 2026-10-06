@@ -30,6 +30,10 @@
     <string name="main_version_label">轻复制 v%1$s</string>
     <string name="main_check_update">检查更新</string>
     <string name="main_checking">检查中…</string>
+    <string name="main_add_tile">添加「复制模式」到通知栏</string>
+    <string name="toast_tile_added">已添加到快捷设置面板</string>
+    <string name="toast_tile_already">「复制模式」已在通知栏中</string>
+    <string name="toast_tile_manual">请手动添加：下拉两次通知栏 → 点「编辑」（铅笔）→ 把「复制模式」拖到快捷区域</string>
 
     <string name="keepalive_title">Root 保活</string>
     <string name="keepalive_desc_on">保活中：无障碍服务被关闭时自动恢复（每 15 分钟巡检）</string>

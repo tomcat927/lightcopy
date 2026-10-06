@@ -1,12 +1,16 @@
 package com.tomcat927.lightcopy
 
+import android.content.ComponentName
 import android.content.Intent
+import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.service.quicksettings.TileService
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -86,6 +90,30 @@ class MainActivity : ComponentActivity() {
             var keepAliveBusy by remember { mutableStateOf(false) }
             val scope = rememberCoroutineScope()
             val appContext = applicationContext
+
+            // 一键把「复制模式」瓦片加进快捷设置面板（Android 13+ 系统弹窗；以下引导手动）
+            val onAddTile: () -> Unit = {
+                if (Build.VERSION.SDK_INT >= 33) {
+                    TileService.requestAddTileService(
+                        ComponentName(this@MainActivity, CopyModeTileService::class.java),
+                        getString(R.string.tile_label),
+                        Icon.createWithResource(appContext, R.drawable.ic_tile),
+                        ContextCompat.getMainExecutor(this@MainActivity),
+                    ) { result ->
+                        when (result) {
+                            TileService.TILE_ADD_REQUEST_SUCCESS ->
+                                Toast.makeText(appContext, R.string.toast_tile_added, Toast.LENGTH_SHORT).show()
+                            TileService.TILE_ADD_REQUEST_ALREADY_ADDED ->
+                                Toast.makeText(appContext, R.string.toast_tile_already, Toast.LENGTH_SHORT).show()
+                            else ->
+                                Toast.makeText(appContext, R.string.toast_tile_manual, Toast.LENGTH_LONG).show()
+                        }
+                    }
+                } else {
+                    Toast.makeText(appContext, R.string.toast_tile_manual, Toast.LENGTH_LONG).show()
+                }
+            }
+
             val onKeepAliveToggle: (Boolean) -> Unit = { want ->
                 if (!keepAliveBusy) {
                     if (!want) {
@@ -121,6 +149,7 @@ class MainActivity : ComponentActivity() {
                         onOpenAccessibilitySettings = {
                             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                         },
+                        onAddTile = onAddTile,
                         onCheckUpdate = { updateVm.checkNow() },
                         onKeepAliveToggle = onKeepAliveToggle,
                     )
@@ -142,6 +171,7 @@ private fun LightCopyScreen(
     keepAliveOn: Boolean,
     keepAliveBusy: Boolean,
     onOpenAccessibilitySettings: () -> Unit,
+    onAddTile: () -> Unit,
     onCheckUpdate: () -> Unit,
     onKeepAliveToggle: (Boolean) -> Unit,
 ) {
@@ -212,6 +242,14 @@ private fun LightCopyScreen(
                     color = Color(0xFF8D6E63),
                 )
             }
+        }
+
+        // 一键添加通知栏瓦片
+        OutlinedButton(
+            onClick = onAddTile,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(stringResource(R.string.main_add_tile))
         }
 
         Text(

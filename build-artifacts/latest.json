@@ -1,0 +1,11 @@
+{
+  "tag_name": "v0.1.0-20261007072416",
+  "version_display": "0.1.0 (20261007 072416)",
+  "version_code": 1791329056,
+  "apk": "https://gh-proxy.com/https://github.com/tomcat927/lightcopy/releases/download/v0.1.0-20261007072416/lightcopy-v0.1.0-20261007072416.apk",
+  "github_apk": "https://github.com/tomcat927/lightcopy/releases/download/v0.1.0-20261007072416/lightcopy-v0.1.0-20261007072416.apk",
+  "apk_sha256": "https://gh-proxy.com/https://github.com/tomcat927/lightcopy/releases/download/v0.1.0-20261007072416/lightcopy-v0.1.0-20261007072416.apk.sha256",
+  "github_apk_sha256": "https://github.com/tomcat927/lightcopy/releases/download/v0.1.0-20261007072416/lightcopy-v0.1.0-20261007072416.apk.sha256",
+  "release_url": "https://github.com/tomcat927/lightcopy/releases/tag/v0.1.0-20261007072416",
+  "release_notes": "更新包优先通过 GitHub 代理下载，校验通过后启动系统安装器。"
+}
