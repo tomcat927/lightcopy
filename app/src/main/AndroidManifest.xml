@@ -38,7 +38,9 @@
                 android:resource="@xml/accessibility_service_info" />
         </service>
 
-        <!-- 快捷设置瓦片「复制模式」：不 startService，直接静态调无障碍单例 -->
+        <!-- 快捷设置瓦片「复制模式」：不 startService，直接静态调无障碍单例。
+             注意 action 是官方常量 ACTION_QS_TILE（android.service.quicksettings.action.QS_TILE），
+             写成类名会导致瓦片永远不进系统瓦片池（queryIntentServices 匹配不到） -->
         <service
             android:name=".CopyModeTileService"
             android:exported="true"
@@ -46,7 +48,7 @@
             android:label="@string/tile_label"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter>
-                <action android:name="android.service.quicksettings.TileService" />
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
             </intent-filter>
         </service>
 
