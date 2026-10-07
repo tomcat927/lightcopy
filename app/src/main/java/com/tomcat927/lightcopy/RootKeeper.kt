@@ -105,6 +105,49 @@ object RootKeeper {
         }
     }
 
+    /**
+     * 强制重绑：设置里服务已启用但实际没被绑定（热更新/进程死亡后的僵死状态，
+     * 设置值不变系统不会触发重绑）→ 把本服务从启用列表摘掉再挂回，
+     * 两次设置变更必然触发 AccessibilityManagerService 先解绑再绑定。
+     * 只动本服务，其他无障碍服务不受影响。
+     */
+    fun forceRebind(context: Context): Boolean {
+        val cr = context.contentResolver
+        val cn = ComponentName(context, CopyAccessibilityService::class.java)
+        val short = cn.flattenToShortString()
+        val full = cn.flattenToString()
+        val current = Settings.Secure.getString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+            ?: return false
+        if (current.split(':').none { it.equals(short, true) || it.equals(full, true) }) return false
+        val without = current.split(':')
+            .filter { it.isNotBlank() && !it.equals(short, true) && !it.equals(full, true) }
+            .joinToString(":")
+        return try {
+            if (ContextCompat.checkSelfPermission(
+                    context, Manifest.permission.WRITE_SECURE_SETTINGS
+                ) == PackageManager.PERMISSION_GRANTED
+            ) {
+                Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, without)
+                Thread.sleep(400)
+                Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, current)
+                Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+                Log.d(TAG, "keepalive: force rebind via WRITE_SECURE_SETTINGS")
+                true
+            } else {
+                // 一条 su 命令内完成摘除→等待→挂回→开总开关，避免多次弹 su
+                val script = "settings put secure enabled_accessibility_services '$without' && sleep 0.5 && " +
+                    "settings put secure enabled_accessibility_services '$current' && " +
+                    "settings put secure accessibility_enabled 1"
+                runSu(script, timeoutMs = 10_000).also {
+                    if (it) Log.d(TAG, "keepalive: force rebind via su")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "force rebind failed: ${e.message}")
+            false
+        }
+    }
+
     // ---------- 调度 ----------
 
     /** 15 分钟周期巡检（WorkManager 随重启自恢复） */

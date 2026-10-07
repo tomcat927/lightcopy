@@ -25,6 +25,8 @@ class CopyModeTileService : TileService() {
 
         /** 系统写回设置后 bind 服务通常在几百毫秒内，这里等最多 3 秒 */
         private const val BIND_WAIT_MS = 3_000L
+        /** 强制重绑后的等待稍微放宽 */
+        private const val BIND_WAIT_LONG_MS = 5_000L
         private const val BIND_POLL_MS = 100L
     }
 
@@ -41,12 +43,12 @@ class CopyModeTileService : TileService() {
             return
         }
 
-        // 无障碍未开启：不急着把用户踢去设置，先尝试自动开启
-        // （adb 授予的 WRITE_SECURE_SETTINGS 免弹窗；root 则首次会弹 Magisk 授权框），
-        // 成功就等服务 bind 后直接进复制模式，失败才提示跳设置。
+        // 无障碍未连接：不急着把用户踢去设置，先自动处理
+        // （adb 授予的 WRITE_SECURE_SETTINGS 免弹窗；root 则首次会弹 Magisk 授权框）。
         // su 阻塞绝不能发生在主线程（onClick 在主线程，会 ANR），放后台线程。
         val appContext = applicationContext
         Thread {
+            val instanceAtClick = CopyAccessibilityService.instance != null
             val enabled = RootKeeper.ensureServiceEnabled(appContext, suTimeoutMs = 15_000L)
             if (!enabled) {
                 mainHandler.post {
@@ -57,12 +59,13 @@ class CopyModeTileService : TileService() {
                 return@Thread
             }
 
-            var bound: CopyAccessibilityService? = CopyAccessibilityService.instance
-            var waited = 0L
-            while (bound == null && waited < BIND_WAIT_MS) {
-                Thread.sleep(BIND_POLL_MS)
-                waited += BIND_POLL_MS
-                bound = CopyAccessibilityService.instance
+            var bound = awaitInstance(BIND_WAIT_MS)
+            if (bound == null) {
+                // 设置里已启用但服务没被系统绑定（热更新/进程死亡后的僵死状态，
+                // 设置值不变就不会触发重绑）→ 把本服务摘掉再挂回，强制系统重新 bind
+                val rebound = RootKeeper.forceRebind(appContext)
+                RemoteLog.d(TAG, "tile: enabled but unbound (instanceAtClick=$instanceAtClick), forceRebind=$rebound")
+                if (rebound) bound = awaitInstance(BIND_WAIT_LONG_MS)
             }
 
             mainHandler.post {
@@ -72,12 +75,23 @@ class CopyModeTileService : TileService() {
                     svc.toggleCopyMode()
                     mainHandler.post { updateTile(svc.isCopyModeActive) }
                 } else {
-                    // 已写回设置但绑定还没完成（极少数慢场景），让用户再点一次即可
+                    // 强制重绑也没等到（无 root/WSS 或系统拒绝），让用户去设置页开关一次
                     Toast.makeText(appContext, R.string.toast_tile_wait_bind, Toast.LENGTH_LONG).show()
                     updateTile(false)
                 }
             }
         }.start()
+    }
+
+    /** 轮询等待无障碍服务连接 */
+    private fun awaitInstance(timeoutMs: Long): CopyAccessibilityService? {
+        var waited = 0L
+        while (waited < timeoutMs) {
+            CopyAccessibilityService.instance?.let { return it }
+            Thread.sleep(BIND_POLL_MS)
+            waited += BIND_POLL_MS
+        }
+        return CopyAccessibilityService.instance
     }
 
     override fun onStartListening() {
