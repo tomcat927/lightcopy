@@ -34,6 +34,8 @@
     <string name="remote_log_password">密码</string>
     <string name="remote_log_target_path">远程目录（默认 /lightcopy/logs）</string>
     <string name="remote_log_upload_now">立即上传</string>
+    <string name="remote_log_test">测试连接</string>
+    <string name="remote_log_test_ok">连接成功，目录可用</string>
     <string name="remote_log_copy_all">复制全部日志</string>
     <string name="remote_log_save">保存</string>
 

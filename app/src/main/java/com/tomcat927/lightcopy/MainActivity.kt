@@ -158,6 +158,19 @@ class MainActivity : ComponentActivity() {
                     Toast.makeText(appContext, msg, Toast.LENGTH_LONG).show()
                 }
             }
+            val onTestConnection: () -> Unit = {
+                RemoteLog.testConnection(
+                    logBaseUrl, logUsername, logPassword, logTargetPath,
+                ) { result ->
+                    val msg = when (result) {
+                        RemoteLog.UploadResult.OK -> appContext.getString(R.string.remote_log_test_ok)
+                        RemoteLog.UploadResult.NOT_CONFIGURED -> appContext.getString(R.string.remote_log_need_config)
+                        RemoteLog.UploadResult.AUTH_FAILED -> appContext.getString(R.string.remote_log_auth_failed)
+                        RemoteLog.UploadResult.FAILED -> appContext.getString(R.string.remote_log_upload_failed)
+                    }
+                    Toast.makeText(appContext, msg, Toast.LENGTH_LONG).show()
+                }
+            }
             val onCopyLogs: () -> Unit = {
                 val ok = RemoteLog.copyAllToClipboard(appContext)
                 Toast.makeText(
@@ -209,6 +222,7 @@ class MainActivity : ComponentActivity() {
                                 showLogDialog = false
                             },
                             onUploadNow = onUploadNow,
+                            onTestConnection = onTestConnection,
                             onCopyLogs = onCopyLogs,
                             onDismiss = { showLogDialog = false },
                         )
@@ -280,6 +294,7 @@ private fun RemoteLogDialog(
     onTargetPathChange: (String) -> Unit,
     onSave: () -> Unit,
     onUploadNow: () -> Unit,
+    onTestConnection: () -> Unit,
     onCopyLogs: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -329,6 +344,7 @@ private fun RemoteLogDialog(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = onTestConnection) { Text(stringResource(R.string.remote_log_test)) }
                     TextButton(onClick = onUploadNow) { Text(stringResource(R.string.remote_log_upload_now)) }
                     TextButton(onClick = onCopyLogs) { Text(stringResource(R.string.remote_log_copy_all)) }
                 }

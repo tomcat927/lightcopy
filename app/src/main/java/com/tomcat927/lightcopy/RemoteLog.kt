@@ -3,6 +3,8 @@ package com.tomcat927.lightcopy
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -53,6 +55,7 @@ object RemoteLog {
     private val format = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
     private val fileFormat = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
     private val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "RemoteLog").apply { isDaemon = true } }
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val http = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
@@ -171,7 +174,8 @@ object RemoteLog {
 
     /**
      * 把待传日志作为独立诊断文件上传到 OpenList，成功后清空本地待传文件。
-     * onResult 在后台线程回调；(OK, 远程路径) 或 (失败原因, null)。
+     * 结果回调统一切主线程（后台线程里弹 Toast 会直接崩）。
+     * onResult 回调 (OK, 远程路径) 或 (失败原因, null)。
      */
     fun upload(reason: String, onResult: ((UploadResult, String?) -> Unit)?) {
         val ctx = appContext
@@ -182,7 +186,42 @@ object RemoteLog {
         executor.execute {
             val result = uploadBlocking(ctx, reason)
             if (result.first != UploadResult.OK) w(TAG, "日志上传失败（$reason）: $result")
-            onResult?.invoke(result.first, result.second)
+            mainHandler.post { onResult?.invoke(result.first, result.second) }
+        }
+    }
+
+    /**
+     * 测试 OpenList 连接：用当前填写的账号做一次全新登录并验证目标目录可创建。
+     * 密码留空时回退到已保存的密码（与保存逻辑一致）。
+     */
+    fun testConnection(
+        baseUrl: String,
+        username: String,
+        password: String,
+        targetPath: String,
+        onResult: ((UploadResult) -> Unit)?,
+    ) {
+        if (baseUrl.isBlank() || username.isBlank()) {
+            mainHandler.post { onResult?.invoke(UploadResult.NOT_CONFIGURED) }
+            return
+        }
+        val effectivePassword = password.ifBlank {
+            appContext?.let { getPassword(it) }.orEmpty()
+        }
+        if (effectivePassword.isBlank()) {
+            mainHandler.post { onResult?.invoke(UploadResult.NOT_CONFIGURED) }
+            return
+        }
+        executor.execute {
+            val result = runCatching {
+                val base = baseUrl.trim().trimEnd('/')
+                val token = login(base, username.trim(), effectivePassword)
+                mkdir(base, token, normalizeTargetPath(targetPath))
+                UploadResult.OK
+            }.getOrElse {
+                if (it is AuthException) UploadResult.AUTH_FAILED else UploadResult.FAILED
+            }
+            mainHandler.post { onResult?.invoke(result) }
         }
     }
 
