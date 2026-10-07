@@ -53,6 +53,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -123,26 +124,38 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // 远程日志：默认关、URL 用户自配；一键复制日志可直接贴给开发者排查
+            // 远程日志（OpenList）：默认关；日志作为独立诊断文件上传到自配 OpenList 目录
             var remoteLogOn by remember { mutableStateOf(RemoteLog.isEnabled(this@MainActivity)) }
             var showLogDialog by remember { mutableStateOf(false) }
-            var logUrl by remember { mutableStateOf(RemoteLog.getUrl(this@MainActivity)) }
+            var logBaseUrl by remember { mutableStateOf("") }
+            var logUsername by remember { mutableStateOf("") }
+            var logPassword by remember { mutableStateOf("") }
+            var logTargetPath by remember { mutableStateOf("") }
+            val openLogDialog: () -> Unit = {
+                logBaseUrl = RemoteLog.getBaseUrl(appContext)
+                logUsername = RemoteLog.getUsername(appContext)
+                logPassword = RemoteLog.getPassword(appContext)
+                logTargetPath = RemoteLog.getTargetPath(appContext)
+                showLogDialog = true
+            }
             val onRemoteLogToggle: (Boolean) -> Unit = { want ->
-                if (want && logUrl.isBlank()) {
-                    Toast.makeText(appContext, R.string.remote_log_need_url, Toast.LENGTH_LONG).show()
-                    showLogDialog = true
+                if (want && !RemoteLog.isConfigured(appContext)) {
+                    Toast.makeText(appContext, R.string.remote_log_need_config, Toast.LENGTH_LONG).show()
+                    openLogDialog()
                 } else {
                     remoteLogOn = want
                     RemoteLog.setEnabled(appContext, want)
                 }
             }
             val onUploadNow: () -> Unit = {
-                RemoteLog.upload("manual") { ok ->
-                    Toast.makeText(
-                        appContext,
-                        if (ok) R.string.remote_log_uploaded else R.string.remote_log_upload_failed,
-                        Toast.LENGTH_SHORT,
-                    ).show()
+                RemoteLog.upload("manual") { result, path ->
+                    val msg = when (result) {
+                        RemoteLog.UploadResult.OK -> appContext.getString(R.string.remote_log_uploaded, path ?: "")
+                        RemoteLog.UploadResult.NOT_CONFIGURED -> appContext.getString(R.string.remote_log_need_config)
+                        RemoteLog.UploadResult.AUTH_FAILED -> appContext.getString(R.string.remote_log_auth_failed)
+                        RemoteLog.UploadResult.FAILED -> appContext.getString(R.string.remote_log_upload_failed)
+                    }
+                    Toast.makeText(appContext, msg, Toast.LENGTH_LONG).show()
                 }
             }
             val onCopyLogs: () -> Unit = {
@@ -170,7 +183,7 @@ class MainActivity : ComponentActivity() {
                         onAddTile = onAddTile,
                         onCheckUpdate = { updateVm.checkNow() },
                         onKeepAliveToggle = onKeepAliveToggle,
-                        onOpenLogDialog = { showLogDialog = true },
+                        onOpenLogDialog = openLogDialog,
                         onRemoteLogToggle = onRemoteLogToggle,
                         onUploadNow = onUploadNow,
                         onCopyLogs = onCopyLogs,
@@ -178,11 +191,17 @@ class MainActivity : ComponentActivity() {
                     UpdateDialog(updateVm)
                     if (showLogDialog) {
                         RemoteLogDialog(
-                            url = logUrl,
-                            onUrlChange = { logUrl = it },
+                            baseUrl = logBaseUrl,
+                            username = logUsername,
+                            password = logPassword,
+                            targetPath = logTargetPath,
+                            onBaseUrlChange = { logBaseUrl = it },
+                            onUsernameChange = { logUsername = it },
+                            onPasswordChange = { logPassword = it },
+                            onTargetPathChange = { logTargetPath = it },
                             onSave = {
-                                RemoteLog.setUrl(appContext, logUrl)
-                                if (logUrl.isNotBlank()) {
+                                RemoteLog.saveConfig(appContext, logBaseUrl, logUsername, logPassword, logTargetPath)
+                                if (RemoteLog.isConfigured(appContext)) {
                                     remoteLogOn = true
                                     RemoteLog.setEnabled(appContext, true)
                                 }
@@ -251,8 +270,14 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun RemoteLogDialog(
-    url: String,
-    onUrlChange: (String) -> Unit,
+    baseUrl: String,
+    username: String,
+    password: String,
+    targetPath: String,
+    onBaseUrlChange: (String) -> Unit,
+    onUsernameChange: (String) -> Unit,
+    onPasswordChange: (String) -> Unit,
+    onTargetPathChange: (String) -> Unit,
     onSave: () -> Unit,
     onUploadNow: () -> Unit,
     onCopyLogs: () -> Unit,
@@ -270,9 +295,35 @@ private fun RemoteLogDialog(
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 OutlinedTextField(
-                    value = url,
-                    onValueChange = onUrlChange,
-                    label = { Text(stringResource(R.string.remote_log_url_label)) },
+                    value = baseUrl,
+                    onValueChange = onBaseUrlChange,
+                    label = { Text(stringResource(R.string.remote_log_base_url)) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = username,
+                        onValueChange = onUsernameChange,
+                        label = { Text(stringResource(R.string.remote_log_username)) },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = onPasswordChange,
+                        label = { Text(stringResource(R.string.remote_log_password)) },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = targetPath,
+                    onValueChange = onTargetPathChange,
+                    label = { Text(stringResource(R.string.remote_log_target_path)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
