@@ -180,6 +180,13 @@ class MainActivity : ComponentActivity() {
                 ).show()
             }
 
+            // 镜像加速更新下载（照 ncm-cloud-player）：默认 gh-proxy 优先，关闭后 GitHub 直连优先
+            var mirrorOn by remember { mutableStateOf(Updater.isPreferMirror(this@MainActivity)) }
+            val onMirrorToggle: (Boolean) -> Unit = { want ->
+                mirrorOn = want
+                Updater.setPreferMirror(appContext, want)
+            }
+
             MaterialTheme(colorScheme = lightColorScheme(primary = Color(0xFF00796B))) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     val updateState by updateVm.state.collectAsState()
@@ -190,16 +197,18 @@ class MainActivity : ComponentActivity() {
                         keepAliveOn = keepAliveOn,
                         keepAliveBusy = keepAliveBusy,
                         remoteLogOn = remoteLogOn,
+                        mirrorOn = mirrorOn,
                         onOpenAccessibilitySettings = {
                             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                         },
                         onAddTile = onAddTile,
-                        onCheckUpdate = { updateVm.checkNow() },
+                        onCheckUpdate = { updateVm.checkNow(mirrorOn) },
                         onKeepAliveToggle = onKeepAliveToggle,
                         onOpenLogDialog = openLogDialog,
                         onRemoteLogToggle = onRemoteLogToggle,
                         onUploadNow = onUploadNow,
                         onCopyLogs = onCopyLogs,
+                        onMirrorToggle = onMirrorToggle,
                     )
                     UpdateDialog(updateVm)
                     if (showLogDialog) {
@@ -367,6 +376,7 @@ private fun LightCopyScreen(
     keepAliveOn: Boolean,
     keepAliveBusy: Boolean,
     remoteLogOn: Boolean,
+    mirrorOn: Boolean,
     onOpenAccessibilitySettings: () -> Unit,
     onAddTile: () -> Unit,
     onCheckUpdate: () -> Unit,
@@ -375,6 +385,7 @@ private fun LightCopyScreen(
     onRemoteLogToggle: (Boolean) -> Unit,
     onUploadNow: () -> Unit,
     onCopyLogs: () -> Unit,
+    onMirrorToggle: (Boolean) -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -524,6 +535,34 @@ private fun LightCopyScreen(
                 Switch(
                     checked = remoteLogOn,
                     onCheckedChange = onRemoteLogToggle,
+                )
+            }
+        }
+
+        // 镜像加速更新下载开关
+        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFF1F3F4))) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.mirror_title),
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = stringResource(
+                            if (mirrorOn) R.string.mirror_desc_on else R.string.mirror_desc_off
+                        ),
+                        fontSize = 13.sp,
+                        color = Color(0xFF616161),
+                    )
+                }
+                Switch(
+                    checked = mirrorOn,
+                    onCheckedChange = onMirrorToggle,
                 )
             }
         }

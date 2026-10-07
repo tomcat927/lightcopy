@@ -23,7 +23,7 @@ sealed interface UpdateState {
     data class Failed(val message: String) : UpdateState
 }
 
-/** 轻复制没有设置页：启动静默检查 + 主页「检查更新」按钮，无任何开关 */
+/** 轻复制没有设置页：启动静默检查 + 主页「检查更新」按钮 + 镜像加速开关 */
 class UpdateViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
@@ -45,7 +45,7 @@ class UpdateViewModel(app: Application) : AndroidViewModel(app) {
         autoChecked = true
         viewModelScope.launch {
             try {
-                val info = Updater.checkForUpdate(getApplication(), direct = true)
+                val info = Updater.checkForUpdate(getApplication(), Updater.isPreferMirror(getApplication()))
                 if (info != null) {
                     RemoteLog.d(TAG, "update available: ${info.tagName}")
                     _state.value = UpdateState.Available(info)
@@ -56,12 +56,12 @@ class UpdateViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun checkNow() {
+    fun checkNow(preferMirror: Boolean) {
         if (_state.value is UpdateState.Downloading) return
         _state.value = UpdateState.Checking
         viewModelScope.launch {
             try {
-                val info = Updater.checkForUpdate(getApplication(), direct = true)
+                val info = Updater.checkForUpdate(getApplication(), preferMirror)
                 _state.value = if (info != null) UpdateState.Available(info) else UpdateState.UpToDate
             } catch (e: Exception) {
                 RemoteLog.w(TAG, "check error ${e.javaClass.simpleName}: ${e.message}")
@@ -76,14 +76,8 @@ class UpdateViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val app = getApplication<Application>()
-                // 先直连 gh-proxy（国内快），整体失败再走系统代理重试一遍
-                val apk = try {
-                    Updater.downloadAndVerify(app, info, direct = true, onProgress = ::onProgress)
-                } catch (directFail: Exception) {
-                    RemoteLog.w(TAG, "direct download failed, retry via system proxy", directFail)
-                    _state.value = UpdateState.Downloading(0, 0)
-                    Updater.downloadAndVerify(app, info, direct = false, onProgress = ::onProgress)
-                }
+                // 主备 URL 按镜像开关排好序，且每条 URL 按归属自动选客户端，逐条尝试即可
+                val apk = Updater.downloadAndVerify(app, info, onProgress = ::onProgress)
                 RemoteLog.d(TAG, "download ok size=${apk.length()}")
                 // 校验通过直接调起系统安装器（系统安装确认即唯一一次确认）；
                 // 仅在首次缺「安装未知应用」权限时才落到 Ready 弹窗引导授权

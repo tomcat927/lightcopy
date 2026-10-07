@@ -24,7 +24,9 @@ import java.util.concurrent.TimeUnit
  *
  * 版本发布链路：CI 每次 push main 构建正式签名 APK 并发布 Release，
  * 同时上传 latest.json 清单（version_code 为构建时间戳，单调递增）。
- * App 优先走 gh-proxy 加速清单，失败回退 GitHub 直连清单，再回退 GitHub API。
+ * 「镜像加速」开关（照 ncm-cloud-player）：开启时清单/下载/校验优先走 gh-proxy.com（国内可直连），
+ * 关闭时优先 GitHub 直连，镜像仅作兜底；每条 URL 按归属自动选 HTTP 客户端
+ * （gh-proxy 绕过系统代理，GitHub 直连走系统代理）。
  */
 object Updater {
 
@@ -36,6 +38,9 @@ object Updater {
         "https://github.com/$OWNER/$REPO/releases/latest/download/latest.json"
     private const val MANIFEST_URL_PROXIED = PROXY_PREFIX + MANIFEST_URL
     private const val API_URL = "https://api.github.com/repos/$OWNER/$REPO/releases/latest"
+
+    private const val PREFS = "lightcopy_prefs"
+    private const val KEY_PREFER_MIRROR = "update_prefer_mirror"
 
     data class UpdateInfo(
         val tagName: String,
@@ -49,12 +54,34 @@ object Updater {
         val notes: String?
     )
 
-    /** direct=true 时绕过系统代理直连（gh-proxy 国内可直连）；false 走系统代理 */
-    private fun client(direct: Boolean): OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
-        .proxy(if (direct) Proxy.NO_PROXY else null)
-        .build()
+    // gh-proxy 国内可直连（绕过系统代理）；GitHub 直连走系统代理（需要代理的用户自行开启）
+    private val directClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS)
+            .proxy(Proxy.NO_PROXY)
+            .build()
+    }
+    private val systemClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS)
+            .build()
+    }
+
+    private fun clientFor(url: String): OkHttpClient =
+        if (url.startsWith(PROXY_PREFIX)) directClient else systemClient
+
+    // ---------- 镜像加速开关 ----------
+
+    fun isPreferMirror(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_PREFER_MIRROR, true)
+
+    fun setPreferMirror(context: Context, value: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_PREFER_MIRROR, value).apply()
+        RemoteLog.i(TAG, "镜像加速更新下载 = $value")
+    }
 
     fun currentVersionCode(context: Context): Long = try {
         context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode
@@ -69,29 +96,29 @@ object Updater {
     }
 
     /** 检查更新，返回 null 表示已是最新或检查失败 */
-    suspend fun checkForUpdate(context: Context, direct: Boolean): UpdateInfo? =
+    suspend fun checkForUpdate(context: Context, preferMirror: Boolean): UpdateInfo? =
         withContext(Dispatchers.IO) {
             val current = currentVersionCode(context)
-            val info = checkManifest(direct)
-                ?: checkManifest(!direct)
-                ?: checkGithubApi(direct)
-                ?: checkGithubApi(!direct)
+            val info = checkManifest(preferMirror)
+                ?: checkManifest(!preferMirror)
+                ?: checkGithubApi(preferMirror)
+                ?: checkGithubApi(!preferMirror)
             if (info != null && info.versionCode > current) info else null
         }
 
-    private fun checkManifest(direct: Boolean): UpdateInfo? {
+    private fun checkManifest(preferMirror: Boolean): UpdateInfo? {
         return try {
-            val url = if (direct) MANIFEST_URL_PROXIED else MANIFEST_URL
-            val body = client(direct).newCall(Request.Builder().url(url).build())
+            val url = if (preferMirror) MANIFEST_URL_PROXIED else MANIFEST_URL
+            val body = clientFor(url).newCall(Request.Builder().url(url).build())
                 .execute().use { if (it.isSuccessful) it.body?.string() else null }
                 ?: return null
-            parseManifest(body)
+            parseManifest(body, preferMirror)
         } catch (_: Exception) {
             null
         }
     }
 
-    private fun parseManifest(json: String): UpdateInfo? {
+    private fun parseManifest(json: String, preferMirror: Boolean): UpdateInfo? {
         return runCatching {
             val d = JSONObject(json)
             val code = d.getLong("version_code")
@@ -102,27 +129,30 @@ object Updater {
             if (apk.isBlank() || ghApk.isBlank() || sha.isBlank() || ghSha.isBlank()) {
                 return null
             }
+            // 按开关决定主备顺序：镜像关闭时 GitHub 直连为主、镜像兜底
+            val (primary, secondary) = if (preferMirror) apk to ghApk else ghApk to apk
+            val (primarySha, secondarySha) = if (preferMirror) sha to ghSha else ghSha to sha
             UpdateInfo(
                 tagName = d.optString("tag_name", ""),
                 versionCode = code,
                 versionDisplay = d.optString("version_display", d.optString("tag_name", "")),
-                downloadUrl = apk,
-                fallbackDownloadUrl = ghApk,
-                checksumUrl = sha,
-                fallbackChecksumUrl = ghSha,
+                downloadUrl = primary,
+                fallbackDownloadUrl = secondary,
+                checksumUrl = primarySha,
+                fallbackChecksumUrl = secondarySha,
                 releaseUrl = d.optString("release_url", ""),
                 notes = d.optString("release_notes", null)
             )
         }.getOrNull()
     }
 
-    private fun checkGithubApi(direct: Boolean): UpdateInfo? {
+    private fun checkGithubApi(preferMirror: Boolean): UpdateInfo? {
         return try {
             val req = Request.Builder().url(API_URL)
                 .header("Accept", "application/vnd.github+json")
                 .header("User-Agent", REPO)
                 .build()
-            val body = client(direct).newCall(req).execute()
+            val body = clientFor(API_URL).newCall(req).execute()
                 .use { if (it.isSuccessful) it.body?.string() else null }
                 ?: return null
             val d = JSONObject(body)
@@ -140,14 +170,16 @@ object Updater {
                 }
             }
             if (apk.isBlank() || sha.isBlank()) return null
+            val (primary, secondary) = if (preferMirror) PROXY_PREFIX + apk to apk else apk to PROXY_PREFIX + apk
+            val (primarySha, secondarySha) = if (preferMirror) PROXY_PREFIX + sha to sha else sha to PROXY_PREFIX + sha
             UpdateInfo(
                 tagName = tag,
                 versionCode = code,
                 versionDisplay = tag.removePrefix("v"),
-                downloadUrl = PROXY_PREFIX + apk,
-                fallbackDownloadUrl = apk,
-                checksumUrl = PROXY_PREFIX + sha,
-                fallbackChecksumUrl = sha,
+                downloadUrl = primary,
+                fallbackDownloadUrl = secondary,
+                checksumUrl = primarySha,
+                fallbackChecksumUrl = secondarySha,
                 releaseUrl = d.optString("html_url", ""),
                 notes = d.optString("body", null)
             )
@@ -173,7 +205,6 @@ object Updater {
     suspend fun downloadAndVerify(
         context: Context,
         info: UpdateInfo,
-        direct: Boolean,
         onProgress: (received: Long, total: Long) -> Unit
     ): File = withContext(Dispatchers.IO) {
         val dir = File(context.cacheDir, "apk_updates").apply { mkdirs() }
@@ -182,7 +213,7 @@ object Updater {
 
         // 已有完整下载且校验通过 → 跳过下载
         if (file.exists() && file.length() > 0) {
-            val expected = readChecksum(listOf(info.checksumUrl, info.fallbackChecksumUrl), direct)
+            val expected = readChecksum(listOf(info.checksumUrl, info.fallbackChecksumUrl))
                 ?: sidecar.takeIf { it.exists() }?.readText()?.trim()
             if (expected != null && sha256(file) == expected.lowercase()) {
                 onProgress(file.length(), file.length())
@@ -195,8 +226,9 @@ object Updater {
         var lastError: Exception? = null
         for (url in listOf(info.downloadUrl, info.fallbackDownloadUrl)) {
             try {
-                download(url, file, direct, onProgress)
-                val expected = readChecksum(listOf(info.checksumUrl, info.fallbackChecksumUrl), direct)
+                RemoteLog.d(TAG, "download try: ${if (url.startsWith(PROXY_PREFIX)) "mirror" else "github-direct"}")
+                download(url, file, onProgress)
+                val expected = readChecksum(listOf(info.checksumUrl, info.fallbackChecksumUrl))
                     ?: error("无法获取 SHA-256 校验值")
                 val actual = sha256(file)
                 if (actual != expected.lowercase()) {
@@ -218,14 +250,13 @@ object Updater {
     private fun download(
         url: String,
         file: File,
-        direct: Boolean,
         onProgress: (Long, Long) -> Unit
     ) {
         val existing = if (file.exists()) file.length() else 0L
         val req = Request.Builder().url(url).apply {
             if (existing > 0) header("Range", "bytes=$existing-")
         }.build()
-        client(direct).newCall(req).execute().use { resp ->
+        clientFor(url).newCall(req).execute().use { resp ->
             when (resp.code) {
                 200, 206 -> {}
                 416 -> error("断点信息失效")
@@ -259,10 +290,10 @@ object Updater {
     private fun hex(digest: MessageDigest): String =
         digest.digest().joinToString("") { "%02x".format(it) }
 
-    private fun readChecksum(urls: List<String>, direct: Boolean): String? {
+    private fun readChecksum(urls: List<String>): String? {
         for (url in urls) {
             try {
-                val body = client(direct).newCall(Request.Builder().url(url).build())
+                val body = clientFor(url).newCall(Request.Builder().url(url).build())
                     .execute().use { if (it.isSuccessful) it.body?.string() else null } ?: continue
                 val value = body.trim().split(Regex("\\s+")).firstOrNull() ?: continue
                 if (value.length == 64 && Regex("^[0-9a-fA-F]{64}$").matches(value)) return value

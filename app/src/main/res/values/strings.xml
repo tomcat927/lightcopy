@@ -58,6 +58,10 @@
     <string name="toast_tile_already">「复制模式」已在通知栏中</string>
     <string name="toast_tile_manual">请手动添加：下拉两次通知栏 → 点「编辑」（铅笔）→ 把「复制模式」拖到快捷区域</string>
 
+    <string name="mirror_title">镜像加速更新</string>
+    <string name="mirror_desc_on">已开启：更新资源经 gh-proxy.com 中转（国内直连）</string>
+    <string name="mirror_desc_off">已关闭：优先 GitHub 直连，镜像仅作兜底</string>
+
     <string name="keepalive_title">Root 保活</string>
     <string name="keepalive_desc_on">保活中：无障碍服务被关闭时自动恢复（每 15 分钟巡检）</string>
     <string name="keepalive_desc_off">开启后将请求 root 权限，在无障碍服务被关闭时自动恢复</string>
