@@ -1,12 +1,13 @@
 package com.tomcat927.lightcopy
 
 import android.Manifest
-import android.app.NotificationChannelCompat
-import android.app.NotificationManagerCompat
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.FileProvider
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
@@ -55,7 +56,7 @@ class UpdateWorker(
         val prefs = context.getSharedPreferences("lightcopy_prefs", Context.MODE_PRIVATE)
         if (prefs.getString(KEY_LAST_NOTIFIED_TAG, "") == info.tagName) return
 
-        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.createNotificationChannel(
             NotificationChannelCompat.Builder(CHANNEL_ID, NotificationManagerCompat.IMPORTANCE_DEFAULT)
                 .setName("更新就绪通知")
