@@ -202,7 +202,7 @@ object RemoteLog {
 
         try {
             val snapshot = buildSnapshot(ctx, uploading, reason)
-            if (snapshot.length > MAX_SNAPSHOT_BYTES) {
+            if (snapshot.size > MAX_SNAPSHOT_BYTES) {
                 w(TAG, "日志快照超 2MB，放弃本次上传")
                 return UploadResult.FAILED to null
             }
