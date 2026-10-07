@@ -62,8 +62,9 @@ object RootKeeper {
      * 恢复无障碍服务（已开启则原样返回 true）。
      * READ/WRITE 走 secure 设置；有 WRITE_SECURE_SETTINGS 用 Java 层写，
      * 没有就用一次 su 调用带两条 settings 命令（减少弹窗与管理器日志噪音）。
+     * suTimeoutMs：首次授权要等用户在管理器里点「允许」，调用方可放宽（如瓦片路径 15 秒）。
      */
-    fun ensureServiceEnabled(context: Context): Boolean {
+    fun ensureServiceEnabled(context: Context, suTimeoutMs: Long = 5_000L): Boolean {
         if (CopyAccessibilityService.isSelfEnabled(context)) return true
         val cr = context.contentResolver
         val cn = ComponentName(context, CopyAccessibilityService::class.java)
@@ -95,7 +96,7 @@ object RootKeeper {
             } else {
                 val script = "settings put secure enabled_accessibility_services '$merged'" +
                     " && settings put secure accessibility_enabled 1"
-                runSu(script).also {
+                runSu(script, timeoutMs = suTimeoutMs).also {
                     if (it) Log.d(TAG, "keepalive: recovered via su")
                 }
             }

@@ -15,6 +15,8 @@
     <string name="toast_no_text">屏幕上没有找到可复制的文本</string>
     <string name="toast_overlay_failed">无法显示悬浮层，请关闭后重新开启无障碍服务再试</string>
     <string name="toast_enable_a11y_first">请先开启「轻复制」的无障碍服务</string>
+    <string name="toast_tile_auto_enabled">已自动开启无障碍服务</string>
+    <string name="toast_tile_wait_bind">无障碍服务启动中，请稍候再点一次瓦片</string>
 
     <string name="main_status_on">无障碍服务已开启</string>
     <string name="main_status_on_sub">下拉通知栏，点「复制模式」即可开始</string>
