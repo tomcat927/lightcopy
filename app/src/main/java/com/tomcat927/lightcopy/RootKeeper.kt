@@ -131,7 +131,7 @@ object RootKeeper {
                 Thread.sleep(400)
                 Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, current)
                 Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
-                Log.d(TAG, "keepalive: force rebind via WRITE_SECURE_SETTINGS")
+                RemoteLog.d(TAG, "keepalive: force rebind via WRITE_SECURE_SETTINGS")
                 true
             } else {
                 // 一条 su 命令内完成摘除→等待→挂回→开总开关，避免多次弹 su
@@ -139,11 +139,11 @@ object RootKeeper {
                     "settings put secure enabled_accessibility_services '$current' && " +
                     "settings put secure accessibility_enabled 1"
                 runSu(script, timeoutMs = 10_000).also {
-                    if (it) Log.d(TAG, "keepalive: force rebind via su")
+                    if (it) RemoteLog.d(TAG, "keepalive: force rebind via su")
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "force rebind failed: ${e.message}")
+            RemoteLog.w(TAG, "force rebind failed: ${e.message}")
             false
         }
     }
