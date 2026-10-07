@@ -96,7 +96,7 @@ fun UpdateDialog(vm: UpdateViewModel) {
             title = { Text("更新失败") },
             text = { Text(s.message, style = MaterialTheme.typography.bodySmall) },
             confirmButton = {
-                TextButton(onClick = { vm.checkNow() }) { Text("重试") }
+                TextButton(onClick = { vm.checkNow(Updater.isPreferMirror(ctx)) }) { Text("重试") }
             },
             dismissButton = { TextButton(onClick = { vm.dismiss() }) { Text("关闭") } }
         )
