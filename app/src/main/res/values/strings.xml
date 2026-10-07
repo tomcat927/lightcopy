@@ -28,10 +28,12 @@
     <string name="remote_log_auth_failed">OpenList 认证失败，请检查用户名和密码</string>
     <string name="remote_log_copied">日志已复制到剪贴板</string>
     <string name="remote_log_empty">暂无日志</string>
-    <string name="remote_log_dialog_hint">日志将以独立文本文件上传到 OpenList 的指定目录（每台设备一个子目录），只含事件与状态、绝不含复制的文本内容。填好后点「保存」即开启。</string>
+    <string name="remote_log_dialog_hint">日志将以独立文本文件上传到 OpenList 的指定目录（每台设备一个子目录），只含事件与状态、绝不含复制的文本内容。密码点「保存」后存于本机，重新打开以圆点回显，可点「显示」查看明文。</string>
     <string name="remote_log_base_url">OpenList 地址</string>
     <string name="remote_log_username">用户名</string>
     <string name="remote_log_password">密码</string>
+    <string name="remote_log_show">显示</string>
+    <string name="remote_log_hide">隐藏</string>
     <string name="remote_log_target_path">远程目录（默认 /lightcopy/logs）</string>
     <string name="remote_log_upload_now">立即上传</string>
     <string name="remote_log_test">测试连接</string>

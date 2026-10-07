@@ -54,6 +54,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -307,6 +308,8 @@ private fun RemoteLogDialog(
     onCopyLogs: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    // 密码默认圆点显示，点「显示」明文查看
+    var passwordVisible by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.remote_log_title)) },
@@ -339,8 +342,19 @@ private fun RemoteLogDialog(
                         onValueChange = onPasswordChange,
                         label = { Text(stringResource(R.string.remote_log_password)) },
                         singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.weight(1f),
+                        visualTransformation = if (passwordVisible) VisualTransformation.None
+                        else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            TextButton(onClick = { passwordVisible = !passwordVisible }) {
+                                Text(
+                                    stringResource(
+                                        if (passwordVisible) R.string.remote_log_hide else R.string.remote_log_show
+                                    ),
+                                    fontSize = 12.sp,
+                                )
+                            }
+                        },
+                        modifier = Modifier.weight(1.3f),
                     )
                 }
                 Spacer(modifier = Modifier.height(8.dp))
