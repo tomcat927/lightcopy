@@ -133,7 +133,7 @@ object RemoteLog {
                 val pending = File(dir, PENDING_FILE)
                 if (!pending.exists() || pending.length() == 0L) {
                     onResult?.invoke(true)   // 无待传内容视为成功
-                    return@runCatching
+                    return@runCatching true
                 }
                 val uploading = File(dir, "remote_uploading.log")
                 if (!pending.renameTo(uploading)) error("rename failed")

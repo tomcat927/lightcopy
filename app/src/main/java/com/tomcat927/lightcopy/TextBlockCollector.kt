@@ -33,6 +33,8 @@ object TextBlockCollector {
         val blocks = LinkedHashMap<String, TextBlock>()
         val allocatedNodes = ArrayList<AccessibilityNodeInfo>()
         val allocatedWindows = ArrayList<AccessibilityWindowInfo>()
+        var sourcePkgs: List<String> = emptyList()
+        var dualPath = false
 
         try {
             val roots = ArrayList<AccessibilityNodeInfo>()
@@ -64,6 +66,8 @@ object TextBlockCollector {
             for (root in roots) {
                 bfs(root, blocks, displayBounds, allocatedNodes)
             }
+            sourcePkgs = roots.mapNotNull { it.packageName?.toString() }.distinct()
+            dualPath = activeRoot != null && activeRoot.packageName?.toString() == ownPackage
         } finally {
             // API 33 起节点不再需要手动 recycle
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
@@ -76,12 +80,10 @@ object TextBlockCollector {
         // 阅读序：先按 top、再按 left
         result.sortWith(compareBy({ it.bounds.top }, { it.bounds.left }))
         val filtered = dropAncestors(result)
-        val sourcePkgs = roots.mapNotNull { it.packageName?.toString() }.distinct()
         RemoteLog.d(
             TAG,
             "collect: ${filtered.size} blocks (${result.size} raw, roots=$sourcePkgs, " +
-                "dualPath=${activeRoot != null && activeRoot.packageName?.toString() == ownPackage}) " +
-                "in ${System.currentTimeMillis() - startMs} ms"
+                "dualPath=$dualPath) in ${System.currentTimeMillis() - startMs} ms"
         )
         return filtered
     }
