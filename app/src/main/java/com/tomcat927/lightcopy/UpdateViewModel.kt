@@ -39,7 +39,7 @@ class UpdateViewModel(app: Application) : AndroidViewModel(app) {
     /** 每个进程只静默自动检查一次 */
     private var autoChecked = false
 
-    /** 启动静默检查：只有发现新版本才弹窗，无更新或失败均不打扰 */
+    /** 启动静默检查：只有发现新版本才弹窗，无更新或失败均不打扰；发现后自动转后台预下载 */
     fun autoCheckIfNeeded() {
         if (autoChecked) return
         autoChecked = true
@@ -49,10 +49,28 @@ class UpdateViewModel(app: Application) : AndroidViewModel(app) {
                 if (info != null) {
                     RemoteLog.d(TAG, "update available: ${info.tagName}")
                     _state.value = UpdateState.Available(info)
+                    enqueueBackgroundDownload()
                 }
             } catch (e: Exception) {
                 RemoteLog.w(TAG, "auto check failed: ${e.message}")
             }
+        }
+    }
+
+    /** 发现新版本后交给 WorkManager 后台预下载：关掉 app 也会继续，完成发通知 */
+    fun enqueueBackgroundDownload() {
+        runCatching {
+            androidx.work.WorkManager.getInstance(getApplication()).enqueueUniqueWork(
+                UpdateWorker.WORK_ONE_TIME,
+                androidx.work.ExistingWorkPolicy.KEEP,
+                androidx.work.OneTimeWorkRequestBuilder<UpdateWorker>()
+                    .setConstraints(
+                        androidx.work.Constraints.Builder()
+                            .setRequiredNetworkType(androidx.work.NetworkType.CONNECTED)
+                            .build()
+                    )
+                    .build(),
+            )
         }
     }
 
@@ -62,7 +80,12 @@ class UpdateViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val info = Updater.checkForUpdate(getApplication(), preferMirror)
-                _state.value = if (info != null) UpdateState.Available(info) else UpdateState.UpToDate
+                if (info != null) {
+                    _state.value = UpdateState.Available(info)
+                    enqueueBackgroundDownload()
+                } else {
+                    _state.value = UpdateState.UpToDate
+                }
             } catch (e: Exception) {
                 RemoteLog.w(TAG, "check error ${e.javaClass.simpleName}: ${e.message}")
                 _state.value = UpdateState.Failed(e.message ?: "检查更新失败")

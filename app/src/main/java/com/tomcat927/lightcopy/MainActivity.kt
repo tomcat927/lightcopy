@@ -1,8 +1,10 @@
 package com.tomcat927.lightcopy
 
+import android.Manifest
+import android.app.StatusBarManager
 import android.content.ComponentName
 import android.content.Intent
-import android.app.StatusBarManager
+import android.content.pm.PackageManager
 import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Bundle
@@ -10,7 +12,9 @@ import android.provider.Settings
 import android.service.quicksettings.TileService
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -87,6 +91,22 @@ class MainActivity : ComponentActivity() {
 
             // 启动静默检查更新：仅发现新版本时弹窗
             LaunchedEffect(Unit) { updateVm.autoCheckIfNeeded() }
+
+            // 后台更新就绪通知：Android 13+ 需通知权限，仅询问一次
+            if (Build.VERSION.SDK_INT >= 33) {
+                val notifPrefs = getSharedPreferences("lightcopy_prefs", MODE_PRIVATE)
+                val notifGranted = ContextCompat.checkSelfPermission(
+                    this, Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
+                val notifAsked = notifPrefs.getBoolean("notif_permission_asked", false)
+                val notifLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission()
+                ) { }
+                if (!notifGranted && !notifAsked) {
+                    notifPrefs.edit().putBoolean("notif_permission_asked", true).apply()
+                    LaunchedEffect(Unit) { notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
+                }
+            }
 
             // 保活开启时，打开 app 顺带兜底恢复一次（不等 WorkManager 巡检）
             if (RootKeeper.isKeepAliveOn(this@MainActivity)) {

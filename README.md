@@ -15,7 +15,7 @@
 
 - `com.tomcat927.lightcopy`，单模块 :app，minSdk 26 / targetSdk 34
 - 主页 Compose；悬浮选择层传统 View + Canvas
-- 热更新：CI 每次 push main 自动发 Release 并生成 `latest.json` 清单，App 内「检查更新」自动下载 + SHA-256 校验 + 调起系统安装器；「镜像加速更新」开关控制 gh-proxy 优先（默认开）还是 GitHub 直连优先，失败自动互为兜底
+- 热更新：CI 每次 push main 自动发 Release 并生成 `latest.json` 清单，App 内「检查更新」自动下载 + SHA-256 校验 + 调起系统安装器；「镜像加速更新」开关控制 gh-proxy 优先（默认开）还是 GitHub 直连优先，失败自动互为兜底；发现新版本自动后台预下载（WorkManager 承载，关 app 不中断，每 6 小时静默检查），完成后发「点按安装」通知
 - 本机不构建：push main → GitHub Actions 出签名 APK 并自动发 Release（tag 形如 `v0.1.0-时间戳`，保留最近 10 个）
 - 签名 keystore 仅存 GitHub Secrets（KEYSTORE_BASE64/KEYSTORE_PASSWORD/KEY_ALIAS/KEY_PASSWORD），严禁进仓库
 

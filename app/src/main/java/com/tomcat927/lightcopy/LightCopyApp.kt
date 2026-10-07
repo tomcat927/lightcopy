@@ -24,5 +24,20 @@ class LightCopyApp : Application() {
         // 启动时把上次会话遗留的待传日志发出去
         RemoteLog.upload("app-start", null)
         Log.d("LightCopy", "app process start")
+
+        // 每 6 小时后台检查并预下载更新（关掉 app 也在跑）
+        runCatching {
+            androidx.work.WorkManager.getInstance(this).enqueueUniquePeriodicWork(
+                UpdateWorker.WORK_PERIODIC,
+                androidx.work.ExistingPeriodicWorkPolicy.KEEP,
+                androidx.work.PeriodicWorkRequestBuilder<UpdateWorker>(6, java.util.concurrent.TimeUnit.HOURS)
+                    .setConstraints(
+                        androidx.work.Constraints.Builder()
+                            .setRequiredNetworkType(androidx.work.NetworkType.CONNECTED)
+                            .build()
+                    )
+                    .build(),
+            )
+        }
     }
 }

@@ -6,6 +6,8 @@ import android.net.Uri
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -201,50 +203,55 @@ object Updater {
     /**
      * 下载 APK 并 SHA-256 校验，成功返回本地文件。
      * 支持断点续传：已存在的部分文件通过 Range 头续传；校验失败自动删除重下。
+     * 全局互斥：前台「立即更新」与后台预下载并发时串行执行，后到者直接命中缓存秒完成。
      */
+    private val downloadMutex = Mutex()
+
     suspend fun downloadAndVerify(
         context: Context,
         info: UpdateInfo,
         onProgress: (received: Long, total: Long) -> Unit
-    ): File = withContext(Dispatchers.IO) {
-        val dir = File(context.cacheDir, "apk_updates").apply { mkdirs() }
-        val file = File(dir, "lightcopy-update.apk")
-        val sidecar = File(file.absolutePath + ".sha256")
+    ): File = downloadMutex.withLock {
+        withContext(Dispatchers.IO) {
+            val dir = File(context.cacheDir, "apk_updates").apply { mkdirs() }
+            val file = File(dir, "lightcopy-update.apk")
+            val sidecar = File(file.absolutePath + ".sha256")
 
-        // 已有完整下载且校验通过 → 跳过下载
-        if (file.exists() && file.length() > 0) {
-            val expected = readChecksum(listOf(info.checksumUrl, info.fallbackChecksumUrl))
-                ?: sidecar.takeIf { it.exists() }?.readText()?.trim()
-            if (expected != null && sha256(file) == expected.lowercase()) {
-                onProgress(file.length(), file.length())
-                return@withContext file
-            }
-            file.delete()
-            sidecar.delete()
-        }
-
-        var lastError: Exception? = null
-        for (url in listOf(info.downloadUrl, info.fallbackDownloadUrl)) {
-            try {
-                RemoteLog.d(TAG, "download try: ${if (url.startsWith(PROXY_PREFIX)) "mirror" else "github-direct"}")
-                download(url, file, onProgress)
+            // 已有完整下载且校验通过 → 跳过下载
+            if (file.exists() && file.length() > 0) {
                 val expected = readChecksum(listOf(info.checksumUrl, info.fallbackChecksumUrl))
-                    ?: error("无法获取 SHA-256 校验值")
-                val actual = sha256(file)
-                if (actual != expected.lowercase()) {
-                    file.delete()
-                    sidecar.delete()
-                    error("SHA-256 校验失败")
+                    ?: sidecar.takeIf { it.exists() }?.readText()?.trim()
+                if (expected != null && sha256(file) == expected.lowercase()) {
+                    onProgress(file.length(), file.length())
+                    return@withContext file
                 }
-                return@withContext file
-            } catch (e: Exception) {
-                RemoteLog.w(TAG, "download failed from $url: ${e.message}")
-                lastError = e
                 file.delete()
                 sidecar.delete()
             }
+
+            var lastError: Exception? = null
+            for (url in listOf(info.downloadUrl, info.fallbackDownloadUrl)) {
+                try {
+                    RemoteLog.d(TAG, "download try: ${if (url.startsWith(PROXY_PREFIX)) "mirror" else "github-direct"}")
+                    download(url, file, onProgress)
+                    val expected = readChecksum(listOf(info.checksumUrl, info.fallbackChecksumUrl))
+                        ?: error("无法获取 SHA-256 校验值")
+                    val actual = sha256(file)
+                    if (actual != expected.lowercase()) {
+                        file.delete()
+                        sidecar.delete()
+                        error("SHA-256 校验失败")
+                    }
+                    return@withContext file
+                } catch (e: Exception) {
+                    RemoteLog.w(TAG, "download failed from $url: ${e.message}")
+                    lastError = e
+                    file.delete()
+                    sidecar.delete()
+                }
+            }
+            throw lastError ?: IllegalStateException("下载失败")
         }
-        throw lastError ?: IllegalStateException("下载失败")
     }
 
     private fun download(
