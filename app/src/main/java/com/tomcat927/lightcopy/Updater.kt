@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
-import android.util.Log
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -207,7 +206,7 @@ object Updater {
                 }
                 return@withContext file
             } catch (e: Exception) {
-                Log.w(TAG, "download failed from $url: ${e.message}")
+                RemoteLog.w(TAG, "download failed from $url: ${e.message}")
                 lastError = e
                 file.delete()
                 sidecar.delete()

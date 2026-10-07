@@ -13,26 +13,31 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -118,6 +123,37 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // 远程日志：默认关、URL 用户自配；一键复制日志可直接贴给开发者排查
+            var remoteLogOn by remember { mutableStateOf(RemoteLog.isEnabled(this@MainActivity)) }
+            var showLogDialog by remember { mutableStateOf(false) }
+            var logUrl by remember { mutableStateOf(RemoteLog.getUrl(this@MainActivity)) }
+            val onRemoteLogToggle: (Boolean) -> Unit = { want ->
+                if (want && logUrl.isBlank()) {
+                    Toast.makeText(appContext, R.string.remote_log_need_url, Toast.LENGTH_LONG).show()
+                    showLogDialog = true
+                } else {
+                    remoteLogOn = want
+                    RemoteLog.setEnabled(appContext, want)
+                }
+            }
+            val onUploadNow: () -> Unit = {
+                RemoteLog.upload("manual") { ok ->
+                    Toast.makeText(
+                        appContext,
+                        if (ok) R.string.remote_log_uploaded else R.string.remote_log_upload_failed,
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            }
+            val onCopyLogs: () -> Unit = {
+                val ok = RemoteLog.copyAllToClipboard(appContext)
+                Toast.makeText(
+                    appContext,
+                    if (ok) R.string.remote_log_copied else R.string.remote_log_empty,
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+
             MaterialTheme(colorScheme = lightColorScheme(primary = Color(0xFF00796B))) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     val updateState by updateVm.state.collectAsState()
@@ -127,14 +163,37 @@ class MainActivity : ComponentActivity() {
                         currentVersionName = updateVm.currentVersionName,
                         keepAliveOn = keepAliveOn,
                         keepAliveBusy = keepAliveBusy,
+                        remoteLogOn = remoteLogOn,
                         onOpenAccessibilitySettings = {
                             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                         },
                         onAddTile = onAddTile,
                         onCheckUpdate = { updateVm.checkNow() },
                         onKeepAliveToggle = onKeepAliveToggle,
+                        onOpenLogDialog = { showLogDialog = true },
+                        onRemoteLogToggle = onRemoteLogToggle,
+                        onUploadNow = onUploadNow,
+                        onCopyLogs = onCopyLogs,
                     )
                     UpdateDialog(updateVm)
+                    if (showLogDialog) {
+                        RemoteLogDialog(
+                            url = logUrl,
+                            onUrlChange = { logUrl = it },
+                            onSave = {
+                                RemoteLog.setUrl(appContext, logUrl)
+                                if (logUrl.isNotBlank()) {
+                                    remoteLogOn = true
+                                    RemoteLog.setEnabled(appContext, true)
+                                }
+                                Toast.makeText(appContext, R.string.remote_log_saved, Toast.LENGTH_SHORT).show()
+                                showLogDialog = false
+                            },
+                            onUploadNow = onUploadNow,
+                            onCopyLogs = onCopyLogs,
+                            onDismiss = { showLogDialog = false },
+                        )
+                    }
                 }
             }
         }
@@ -191,16 +250,64 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
+private fun RemoteLogDialog(
+    url: String,
+    onUrlChange: (String) -> Unit,
+    onSave: () -> Unit,
+    onUploadNow: () -> Unit,
+    onCopyLogs: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.remote_log_title)) },
+        text = {
+            Column {
+                Text(
+                    text = stringResource(R.string.remote_log_dialog_hint),
+                    fontSize = 13.sp,
+                    color = Color(0xFF616161),
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = onUrlChange,
+                    label = { Text(stringResource(R.string.remote_log_url_label)) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = onUploadNow) { Text(stringResource(R.string.remote_log_upload_now)) }
+                    TextButton(onClick = onCopyLogs) { Text(stringResource(R.string.remote_log_copy_all)) }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onSave) { Text(stringResource(R.string.remote_log_save)) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.btn_close)) }
+        },
+    )
+}
+
+@Composable
 private fun LightCopyScreen(
     enabled: Boolean,
     updateState: UpdateState,
     currentVersionName: String,
     keepAliveOn: Boolean,
     keepAliveBusy: Boolean,
+    remoteLogOn: Boolean,
     onOpenAccessibilitySettings: () -> Unit,
     onAddTile: () -> Unit,
     onCheckUpdate: () -> Unit,
     onKeepAliveToggle: (Boolean) -> Unit,
+    onOpenLogDialog: () -> Unit,
+    onRemoteLogToggle: (Boolean) -> Unit,
+    onUploadNow: () -> Unit,
+    onCopyLogs: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -319,6 +426,37 @@ private fun LightCopyScreen(
                     checked = keepAliveOn,
                     onCheckedChange = onKeepAliveToggle,
                     enabled = !keepAliveBusy,
+                )
+            }
+        }
+
+        // 远程日志卡片：点卡片改 URL/上传/复制，开关直接切
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFFF1F3F4)),
+            modifier = Modifier.clickable(onClick = onOpenLogDialog),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.remote_log_title),
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = stringResource(
+                            if (remoteLogOn) R.string.remote_log_desc_on else R.string.remote_log_desc_off
+                        ),
+                        fontSize = 13.sp,
+                        color = Color(0xFF616161),
+                    )
+                }
+                Switch(
+                    checked = remoteLogOn,
+                    onCheckedChange = onRemoteLogToggle,
                 )
             }
         }

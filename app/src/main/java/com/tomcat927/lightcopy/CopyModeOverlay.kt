@@ -37,6 +37,7 @@ class CopyModeOverlay(
 ) : FrameLayout(context) {
 
     companion object {
+        private const val TAG = "LightCopy"
         private const val TIMEOUT_MS = 30_000L
         private const val SCRIM_COLOR = 0x28000000
         private const val BLOCK_FILL_COLOR = 0x18FFFFFF
@@ -69,11 +70,17 @@ class CopyModeOverlay(
     private lateinit var toolbar: LinearLayout
 
     private val timeoutHandler = Handler(Looper.getMainLooper())
-    private val timeoutRunnable = Runnable { onDismiss() }
+    private val timeoutRunnable = Runnable {
+        RemoteLog.d(TAG, "overlay: 30 秒超时退出")
+        onDismiss()
+    }
 
     private val screenOffReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == Intent.ACTION_SCREEN_OFF) onDismiss()
+            if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                RemoteLog.d(TAG, "overlay: 熄屏退出")
+                onDismiss()
+            }
         }
     }
 
@@ -195,9 +202,15 @@ class CopyModeOverlay(
                 val up = hitTest(event.rawX, event.rawY)
                 when {
                     // 同一块上按下并抬起 → 复制该块
-                    down >= 0 && up == down -> onCopy(blocks[down].text)
+                    down >= 0 && up == down -> {
+                        RemoteLog.d(TAG, "overlay: 点块复制 ${blocks[down].text.length} chars")
+                        onCopy(blocks[down].text)
+                    }
                     // 空白点击（按下抬起都未命中）→ 退出
-                    down < 0 && up < 0 -> onDismiss()
+                    down < 0 && up < 0 -> {
+                        RemoteLog.d(TAG, "overlay: 空白点击退出")
+                        onDismiss()
+                    }
                 }
                 return true
             }
@@ -230,6 +243,7 @@ class CopyModeOverlay(
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
+            RemoteLog.d(TAG, "overlay: 返回键退出")
             onDismiss()
             return true
         }

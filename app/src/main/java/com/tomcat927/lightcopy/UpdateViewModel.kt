@@ -2,7 +2,6 @@ package com.tomcat927.lightcopy
 
 import android.app.Application
 import android.content.Context
-import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -48,11 +47,11 @@ class UpdateViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val info = Updater.checkForUpdate(getApplication(), direct = true)
                 if (info != null) {
-                    Log.d(TAG, "update available: ${info.tagName}")
+                    RemoteLog.d(TAG, "update available: ${info.tagName}")
                     _state.value = UpdateState.Available(info)
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "auto check failed: ${e.message}")
+                RemoteLog.w(TAG, "auto check failed: ${e.message}")
             }
         }
     }
@@ -65,7 +64,7 @@ class UpdateViewModel(app: Application) : AndroidViewModel(app) {
                 val info = Updater.checkForUpdate(getApplication(), direct = true)
                 _state.value = if (info != null) UpdateState.Available(info) else UpdateState.UpToDate
             } catch (e: Exception) {
-                Log.w(TAG, "check error ${e.javaClass.simpleName}: ${e.message}")
+                RemoteLog.w(TAG, "check error ${e.javaClass.simpleName}: ${e.message}")
                 _state.value = UpdateState.Failed(e.message ?: "检查更新失败")
             }
         }
@@ -81,23 +80,23 @@ class UpdateViewModel(app: Application) : AndroidViewModel(app) {
                 val apk = try {
                     Updater.downloadAndVerify(app, info, direct = true, onProgress = ::onProgress)
                 } catch (directFail: Exception) {
-                    Log.w(TAG, "direct download failed, retry via system proxy", directFail)
+                    RemoteLog.w(TAG, "direct download failed, retry via system proxy", directFail)
                     _state.value = UpdateState.Downloading(0, 0)
                     Updater.downloadAndVerify(app, info, direct = false, onProgress = ::onProgress)
                 }
-                Log.d(TAG, "download ok size=${apk.length()}")
+                RemoteLog.d(TAG, "download ok size=${apk.length()}")
                 // 校验通过直接调起系统安装器（系统安装确认即唯一一次确认）；
                 // 仅在首次缺「安装未知应用」权限时才落到 Ready 弹窗引导授权
                 if (Updater.canInstall(app)) {
                     Updater.installApk(app, apk)
-                    Log.d(TAG, "installer launched")
+                    RemoteLog.d(TAG, "installer launched")
                     _state.value = UpdateState.Idle
                 } else {
-                    Log.d(TAG, "install permission missing, ask user to grant")
+                    RemoteLog.d(TAG, "install permission missing, ask user to grant")
                     _state.value = UpdateState.Ready(info, apk)
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "download fail ${e.javaClass.simpleName}: ${e.message}")
+                RemoteLog.w(TAG, "download fail ${e.javaClass.simpleName}: ${e.message}")
                 _state.value = UpdateState.Failed(e.message ?: "下载失败")
             }
         }

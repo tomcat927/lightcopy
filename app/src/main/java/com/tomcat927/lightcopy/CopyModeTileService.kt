@@ -12,7 +12,6 @@ import android.os.Looper
 import android.provider.Settings
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
-import android.util.Log
 import android.widget.Toast
 
 /**
@@ -105,7 +104,7 @@ class CopyModeTileService : TileService() {
                 @Suppress("DEPRECATION")
                 startActivityAndCollapse(intent)
             }
-        }.onFailure { Log.w(TAG, "open accessibility settings failed", it) }
+        }.onFailure { RemoteLog.w(TAG, "open accessibility settings failed", it) }
     }
 
     /**
@@ -126,7 +125,7 @@ class CopyModeTileService : TileService() {
                 showDialog(dialog)
                 // dialog.show 内部是 post 到主线程的，紧随其后 post dismiss 保证 show 先执行
                 Handler(Looper.getMainLooper()).post { dialog.dismiss() }
-            }.onFailure { Log.w(TAG, "collapse via showDialog failed", it) }
+            }.onFailure { RemoteLog.w(TAG, "collapse via showDialog failed", it) }
         } else {
             runCatching { sendBroadcast(Intent(Intent.ACTION_CLOSE_SYSTEM_DIALOGS)) }
         }

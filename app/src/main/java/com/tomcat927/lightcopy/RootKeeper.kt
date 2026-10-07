@@ -5,7 +5,6 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.pm.PackageManager
 import android.provider.Settings
-import android.util.Log
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.work.CoroutineWorker
@@ -91,17 +90,17 @@ object RootKeeper {
             ) {
                 Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, merged)
                 Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
-                Log.d(TAG, "keepalive: recovered via WRITE_SECURE_SETTINGS")
+                RemoteLog.d(TAG, "keepalive: recovered via WRITE_SECURE_SETTINGS")
                 true
             } else {
                 val script = "settings put secure enabled_accessibility_services '$merged'" +
                     " && settings put secure accessibility_enabled 1"
                 runSu(script, timeoutMs = suTimeoutMs).also {
-                    if (it) Log.d(TAG, "keepalive: recovered via su")
+                    if (it) RemoteLog.d(TAG, "keepalive: recovered via su")
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "keepalive: recover failed: ${e.message}")
+            RemoteLog.w(TAG, "keepalive: recover failed: ${e.message}")
             false
         }
     }
@@ -152,7 +151,7 @@ object RootKeeper {
             errThread.join(500)
             ok
         } catch (e: Exception) {
-            Log.d(TAG, "su unavailable: ${e.message}")
+            RemoteLog.d(TAG, "su unavailable: ${e.message}")
             false
         }
     }
@@ -169,6 +168,8 @@ class KeepAliveWorker(
 
     override suspend fun doWork(): Result {
         val context = applicationContext
+        // 巡检顺带触发日志上传（待传超阈值才发，平时零流量）
+        RemoteLog.maybeUpload("keepalive-work")
         if (!RootKeeper.isKeepAliveOn(context)) return Result.success()
         if (CopyAccessibilityService.isSelfEnabled(context)) return Result.success()
 

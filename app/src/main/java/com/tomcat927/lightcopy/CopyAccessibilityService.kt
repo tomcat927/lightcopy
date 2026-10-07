@@ -10,7 +10,6 @@ import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
-import android.util.Log
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Toast
@@ -51,7 +50,7 @@ class CopyAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        Log.d(TAG, "accessibility service connected")
+        RemoteLog.d(TAG, "accessibility service connected")
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
@@ -106,15 +105,15 @@ class CopyAccessibilityService : AccessibilityService() {
         try {
             windowManager.addView(newOverlay, buildOverlayParams(fallback = false))
             overlay = newOverlay
-            Log.d(TAG, "copy mode on: ${blocks.size} blocks")
+            RemoteLog.d(TAG, "copy mode on: ${blocks.size} blocks")
         } catch (first: Exception) {
-            Log.w(TAG, "TYPE_ACCESSIBILITY_OVERLAY failed, falling back", first)
+            RemoteLog.w(TAG, "TYPE_ACCESSIBILITY_OVERLAY failed, falling back", first)
             try {
                 windowManager.addView(newOverlay, buildOverlayParams(fallback = true))
                 overlay = newOverlay
-                Log.d(TAG, "copy mode on (fallback window type): ${blocks.size} blocks")
+                RemoteLog.d(TAG, "copy mode on (fallback window type): ${blocks.size} blocks")
             } catch (second: Exception) {
-                Log.e(TAG, "add overlay window failed", second)
+                RemoteLog.e(TAG, "add overlay window failed", second)
                 newOverlay.release()
                 Toast.makeText(this, R.string.toast_overlay_failed, Toast.LENGTH_SHORT).show()
             }
@@ -129,7 +128,7 @@ class CopyAccessibilityService : AccessibilityService() {
         // 逐段 runCatching 拆窗：残留的全屏直触窗会吞掉整屏触摸，是最危险的故障形态
         runCatching { windowManager.removeViewImmediate(current) }
             .onFailure { runCatching { windowManager.removeView(current) } }
-        Log.d(TAG, "copy mode off")
+        RemoteLog.d(TAG, "copy mode off")
     }
 
     private fun teardown() {
@@ -152,13 +151,13 @@ class CopyAccessibilityService : AccessibilityService() {
         clipboard.setPrimaryClip(ClipData.newPlainText(getString(R.string.clip_label), text))
         val preview = if (text.length > 24) text.take(24) + "…" else text
         Toast.makeText(this, getString(R.string.toast_copied, preview), Toast.LENGTH_SHORT).show()
-        Log.d(TAG, "copied ${text.length} chars")
+        RemoteLog.d(TAG, "copied ${text.length} chars")
     }
 
     private fun copyAllToClipboard(text: String, count: Int) {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText(getString(R.string.clip_label), text))
         Toast.makeText(this, getString(R.string.toast_copied_all, count), Toast.LENGTH_SHORT).show()
-        Log.d(TAG, "copied all: $count blocks, ${text.length} chars")
+        RemoteLog.d(TAG, "copied all: $count blocks, ${text.length} chars")
     }
 }

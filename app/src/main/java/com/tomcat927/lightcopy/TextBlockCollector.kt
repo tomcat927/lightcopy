@@ -3,7 +3,6 @@ package com.tomcat927.lightcopy
 import android.accessibilityservice.AccessibilityService
 import android.graphics.Rect
 import android.os.Build
-import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import java.util.ArrayDeque
@@ -77,7 +76,13 @@ object TextBlockCollector {
         // 阅读序：先按 top、再按 left
         result.sortWith(compareBy({ it.bounds.top }, { it.bounds.left }))
         val filtered = dropAncestors(result)
-        Log.d(TAG, "collect: ${filtered.size} blocks (${result.size} raw) in ${System.currentTimeMillis() - startMs} ms")
+        val sourcePkgs = roots.mapNotNull { it.packageName?.toString() }.distinct()
+        RemoteLog.d(
+            TAG,
+            "collect: ${filtered.size} blocks (${result.size} raw, roots=$sourcePkgs, " +
+                "dualPath=${activeRoot != null && activeRoot.packageName?.toString() == ownPackage}) " +
+                "in ${System.currentTimeMillis() - startMs} ms"
+        )
         return filtered
     }
 
