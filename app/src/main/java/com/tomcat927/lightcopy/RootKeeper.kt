@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ComponentName
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.widget.Toast
 import androidx.core.content.ContextCompat
@@ -38,6 +39,14 @@ object RootKeeper {
     /** 重绑风暴保护：两次恢复至少间隔 30 秒 */
     private const val MIN_RECOVERY_INTERVAL_MS = 30_000L
 
+    /**
+     * 「摘除本服务后列表为空」时写入的哨兵组件名。
+     * 必须是合法组件名格式（包名/类名），且指向不存在的组件，
+     * 这样系统会把它当成一次真实的服务列表变更（触发解绑本服务），
+     * 又不会真的绑定到任何东西。挂回那一步会把它整个覆盖掉。
+     */
+    private const val REBIND_EMPTY_SENTINEL = "com.tomcat927.lightcopy/.RebindNoop"
+
     fun isKeepAliveOn(context: Context): Boolean =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getBoolean(KEY_KEEPALIVE_ON, false)
@@ -64,7 +73,11 @@ object RootKeeper {
      * suTimeoutMs：首次授权要等用户在管理器里点「允许」，调用方可放宽（如瓦片路径 15 秒）。
      */
     fun ensureServiceEnabled(context: Context, suTimeoutMs: Long = 5_000L): Boolean {
-        if (CopyAccessibilityService.isSelfEnabled(context)) return true
+        val startedAt = SystemClock.elapsedRealtime()
+        if (CopyAccessibilityService.isSelfEnabled(context)) {
+            RemoteLog.d(TAG, "enable service: already enabled")
+            return true
+        }
         val cr = context.contentResolver
         val cn = ComponentName(context, CopyAccessibilityService::class.java)
         val flat = cn.flattenToShortString()
@@ -82,68 +95,123 @@ object RootKeeper {
             }
             .joinToString(":")
             .ifBlank { flat }
+        val hasWriteSecureSettings = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.WRITE_SECURE_SETTINGS
+        ) == PackageManager.PERMISSION_GRANTED
 
+        RemoteLog.i(TAG, "enable service: begin writeSecureSettings=$hasWriteSecureSettings suTimeout=${suTimeoutMs}ms")
         return try {
-            if (ContextCompat.checkSelfPermission(
-                    context, Manifest.permission.WRITE_SECURE_SETTINGS
-                ) == PackageManager.PERMISSION_GRANTED
-            ) {
-                Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, merged)
-                Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
-                RemoteLog.d(TAG, "keepalive: recovered via WRITE_SECURE_SETTINGS")
-                true
+            if (hasWriteSecureSettings) {
+                val listWritten = Settings.Secure.putString(
+                    cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, merged
+                )
+                val masterWritten = Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+                val enabledAfter = CopyAccessibilityService.isSelfEnabled(context)
+                RemoteLog.i(
+                    TAG,
+                    "enable service: secure settings listWrite=$listWritten masterWrite=$masterWritten " +
+                        "enabledAfter=$enabledAfter elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+                )
+                enabledAfter
             } else {
                 val script = "settings put secure enabled_accessibility_services '$merged'" +
                     " && settings put secure accessibility_enabled 1"
-                runSu(script, timeoutMs = suTimeoutMs).also {
-                    if (it) RemoteLog.d(TAG, "keepalive: recovered via su")
-                }
+                val suSucceeded = runSu(script, timeoutMs = suTimeoutMs)
+                val enabledAfter = CopyAccessibilityService.isSelfEnabled(context)
+                RemoteLog.i(
+                    TAG,
+                    "enable service: suSucceeded=$suSucceeded enabledAfter=$enabledAfter " +
+                        "elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+                )
+                suSucceeded && enabledAfter
             }
         } catch (e: Exception) {
-            RemoteLog.w(TAG, "keepalive: recover failed: ${e.message}")
+            RemoteLog.e(TAG, "enable service: recovery failed elapsed=${SystemClock.elapsedRealtime() - startedAt}ms", e)
             false
         }
     }
+
+    /** 摘除后到挂回之间的等待：太短系统来不及处理解绑，太长用户会看到服务闪断 */
+    private const val REBIND_GAP_MS = 700L
+
+    /** 挂回后等待系统重新 bind 的时间（设置写入是异步的，要留出窗口） */
+    private const val REBIND_SETTLE_MS = 1_200L
 
     /**
      * 强制重绑：设置里服务已启用但实际没被绑定（热更新/进程死亡后的僵死状态，
      * 设置值不变系统不会触发重绑）→ 把本服务从启用列表摘掉再挂回，
      * 两次设置变更必然触发 AccessibilityManagerService 先解绑再绑定。
      * 只动本服务，其他无障碍服务不受影响。
+     *
+     * 关键：**摘除后列表可能为空**（本机只开本服务时）。
+     * 空字符串写入 `enabled_accessibility_services` 在多数 ROM 上会被当作无效变更忽略，
+     * 系统看不到"服务消失"这一步 → 只当成一次无意义的重复写入 → 不触发重绑。
+     * 因此列表为空时改写成一个必然无效的哨兵组件名，保证这一步是一次真实的状态变更。
      */
     fun forceRebind(context: Context): Boolean {
+        val startedAt = SystemClock.elapsedRealtime()
         val cr = context.contentResolver
         val cn = ComponentName(context, CopyAccessibilityService::class.java)
         val short = cn.flattenToShortString()
         val full = cn.flattenToString()
         val current = Settings.Secure.getString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
-            ?: return false
-        if (current.split(':').none { it.equals(short, true) || it.equals(full, true) }) return false
-        val without = current.split(':')
+            ?: run {
+                RemoteLog.w(TAG, "force rebind skipped: enabled services setting is null")
+                return false
+            }
+        if (current.split(':').none { it.equals(short, true) || it.equals(full, true) }) {
+            RemoteLog.w(TAG, "force rebind skipped: service is not listed in enabled services")
+            return false
+        }
+        val withoutRaw = current.split(':')
             .filter { it.isNotBlank() && !it.equals(short, true) && !it.equals(full, true) }
             .joinToString(":")
+        // 空列表哨兵：确保"摘除"这一步一定是一次可见的状态变更
+        val without = withoutRaw.ifBlank { REBIND_EMPTY_SENTINEL }
         return try {
             if (ContextCompat.checkSelfPermission(
                     context, Manifest.permission.WRITE_SECURE_SETTINGS
                 ) == PackageManager.PERMISSION_GRANTED
             ) {
-                Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, without)
-                Thread.sleep(400)
-                Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, current)
-                Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
-                RemoteLog.d(TAG, "keepalive: force rebind via WRITE_SECURE_SETTINGS")
-                true
+                val removed = Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, without)
+                Thread.sleep(REBIND_GAP_MS)
+                val restored = Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, current)
+                val masterEnabled = Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+                Thread.sleep(REBIND_SETTLE_MS)
+                val enabledAfter = CopyAccessibilityService.isSelfEnabled(context)
+                RemoteLog.i(
+                    TAG,
+                    "force rebind via secure settings removed=$removed restored=$restored " +
+                        "masterEnabled=$masterEnabled enabledAfter=$enabledAfter " +
+                        "emptiedList=${withoutRaw.isBlank()} elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+                )
+                // 写入成功 + 服务确实回到了启用列表，才算这次重绑动作生效。
+                // 真正"是否绑上"由调用方 awaitInstance 判定（设置生效是异步的）。
+                removed && restored && enabledAfter
             } else {
-                // 一条 su 命令内完成摘除→等待→挂回→开总开关，避免多次弹 su
-                val script = "settings put secure enabled_accessibility_services '$without' && sleep 0.5 && " +
-                    "settings put secure enabled_accessibility_services '$current' && " +
+                // 一条 su 命令内完成摘除→等待→挂回→开总开关，避免多次弹 su。
+                // 注意：这里不能用 `&&` 串联——settings put 偶发返回非 0 会中断整条链，
+                // 导致"摘掉没挂回"，服务被永久关闭。改用 `;` 保证每一步都执行。
+                val script = "settings put secure enabled_accessibility_services '$without'; sleep 0.7; " +
+                    "settings put secure enabled_accessibility_services '$current'; " +
                     "settings put secure accessibility_enabled 1"
-                runSu(script, timeoutMs = 10_000).also {
-                    if (it) RemoteLog.d(TAG, "keepalive: force rebind via su")
-                }
+                val suSucceeded = runSu(script, timeoutMs = 15_000)
+                Thread.sleep(REBIND_SETTLE_MS)
+                val enabledAfter = CopyAccessibilityService.isSelfEnabled(context)
+                RemoteLog.i(
+                    TAG,
+                    "force rebind via su succeeded=$suSucceeded enabledAfter=$enabledAfter " +
+                        "emptiedList=${withoutRaw.isBlank()} elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+                )
+                suSucceeded && enabledAfter
             }
         } catch (e: Exception) {
-            RemoteLog.w(TAG, "force rebind failed: ${e.message}")
+            RemoteLog.e(TAG, "force rebind failed elapsed=${SystemClock.elapsedRealtime() - startedAt}ms", e)
+            // 兜底：确保服务没有被我们留在"已摘除"状态
+            runCatching {
+                Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, current)
+                Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+            }
             false
         }
     }
@@ -180,6 +248,7 @@ object RootKeeper {
     // ---------- root shell ----------
 
     private fun runSu(command: String, timeoutMs: Long = 5_000): Boolean {
+        val startedAt = SystemClock.elapsedRealtime()
         return try {
             val process = ProcessBuilder("su", "-c", command).start()
             // 排空输出防止管道写满阻塞
@@ -189,12 +258,20 @@ object RootKeeper {
             errThread.isDaemon = true
             outThread.start()
             errThread.start()
-            val ok = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS) && process.exitValue() == 0
+            val finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+            val exitCode = if (finished) process.exitValue() else null
+            if (!finished) process.destroyForcibly()
             outThread.join(500)
             errThread.join(500)
-            ok
+            val succeeded = finished && exitCode == 0
+            RemoteLog.i(
+                TAG,
+                "su command finished succeeded=$succeeded timedOut=${!finished} " +
+                    "exitCode=${exitCode ?: -1} elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+            )
+            succeeded
         } catch (e: Exception) {
-            RemoteLog.d(TAG, "su unavailable: ${e.message}")
+            RemoteLog.w(TAG, "su command failed elapsed=${SystemClock.elapsedRealtime() - startedAt}ms", e)
             false
         }
     }

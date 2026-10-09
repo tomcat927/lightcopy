@@ -15,8 +15,9 @@
     <string name="toast_no_text">屏幕上没有找到可复制的文本</string>
     <string name="toast_overlay_failed">无法显示悬浮层，请关闭后重新开启无障碍服务再试</string>
     <string name="toast_enable_a11y_first">请先开启「轻复制」的无障碍服务</string>
-    <string name="toast_tile_auto_enabled">已自动开启无障碍服务</string>
-    <string name="toast_tile_wait_bind">无障碍服务启动中，请稍候再点一次瓦片</string>
+    <string name="toast_tile_auto_enabled">无障碍服务已连接，正在进入复制模式</string>
+    <string name="toast_tile_starting">正在连接无障碍服务，连接后将进入屏幕文字选择模式…</string>
+    <string name="toast_tile_wait_bind">无障碍服务仍未连接，请在设置中关闭后重新开启「轻复制」服务</string>
 
     <string name="remote_log_title">远程日志</string>
     <string name="remote_log_desc_on">已开启：诊断日志将上传到 OpenList（每次一个独立文件，不含复制内容）</string>

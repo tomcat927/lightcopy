@@ -9,10 +9,12 @@ import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.widget.Toast
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 快捷设置瓦片「复制模式」：用户习惯的触发入口。
@@ -28,68 +30,131 @@ class CopyModeTileService : TileService() {
         /** 强制重绑后的等待稍微放宽 */
         private const val BIND_WAIT_LONG_MS = 5_000L
         private const val BIND_POLL_MS = 100L
+        /** 重绑最多尝试轮数：系统 bind 异步且可能被 ROM 节流，一次不成很常见 */
+        private const val REBIND_MAX_ATTEMPTS = 2
+        private val startupInProgress = AtomicBoolean(false)
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onClick() {
         super.onClick()
+        val service = CopyAccessibilityService.instance
+        RemoteLog.i(
+            TAG,
+            "tile: click bound=${service != null} enabled=${CopyAccessibilityService.isSelfEnabled(this)} sdk=${Build.VERSION.SDK_INT}",
+        )
         collapseQsPanel()
 
-        val service = CopyAccessibilityService.instance
         if (service != null) {
+            RemoteLog.d(TAG, "tile: toggle requested on bound service")
             service.toggleCopyMode()
             mainHandler.post { updateTile(service.isCopyModeActive) }
             return
         }
 
-        // 无障碍未连接：不急着把用户踢去设置，先自动处理
-        // （adb 授予的 WRITE_SECURE_SETTINGS 免弹窗；root 则首次会弹 Magisk 授权框）。
-        // su 阻塞绝不能发生在主线程（onClick 在主线程，会 ANR），放后台线程。
+        if (!startupInProgress.compareAndSet(false, true)) {
+            Toast.makeText(this, R.string.toast_tile_starting, Toast.LENGTH_SHORT).show()
+            RemoteLog.d(TAG, "tile: startup already in progress")
+            return
+        }
+
+        // 先给用户明确反馈。root 首次授权可能要等用户在 Magisk/KernelSU 中确认，
+        // 但所有阻塞操作都留在后台线程，不能让瓦片看起来像完全没响应。
+        Toast.makeText(this, R.string.toast_tile_starting, Toast.LENGTH_LONG).show()
         val appContext = applicationContext
-        Thread {
-            val instanceAtClick = CopyAccessibilityService.instance != null
-            val enabled = RootKeeper.ensureServiceEnabled(appContext, suTimeoutMs = 15_000L)
-            if (!enabled) {
+        Thread({
+            val startedAt = SystemClock.elapsedRealtime()
+            try {
+                RemoteLog.i(
+                    TAG,
+                    "tile: service recovery begin enabled=${CopyAccessibilityService.isSelfEnabled(appContext)}",
+                )
+                val enabled = RootKeeper.ensureServiceEnabled(appContext, suTimeoutMs = 15_000L)
+                RemoteLog.i(
+                    TAG,
+                    "tile: enable attempt result=$enabled elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+                )
+                if (!enabled) {
+                    mainHandler.post {
+                        Toast.makeText(appContext, R.string.toast_enable_a11y_first, Toast.LENGTH_LONG).show()
+                        openAccessibilitySettings()
+                        updateTile(false)
+                    }
+                    return@Thread
+                }
+
+                var bound = awaitInstance(BIND_WAIT_MS)
+                RemoteLog.i(
+                    TAG,
+                    "tile: initial bind wait bound=${bound != null} elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+                )
+                if (bound == null) {
+                    // 设置里已启用但服务没被系统绑定（热更新/进程死亡后的僵死状态，
+                    // 设置值不变就不会触发重绑）→ 把本服务摘掉再挂回，强制系统重新 bind。
+                    // 系统 bind 是异步的且可能被 ROM 节流，一次不成很常见，这里给两轮机会。
+                    var attempt = 0
+                    while (bound == null && attempt < REBIND_MAX_ATTEMPTS) {
+                        attempt++
+                        val rebound = RootKeeper.forceRebind(appContext)
+                        RemoteLog.i(
+                            TAG,
+                            "tile: force rebind attempt=$attempt result=$rebound " +
+                                "elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+                        )
+                        if (!rebound) {
+                            // 设置层没写成功（无 root/WSS，或服务已不在启用列表），
+                            // 再重试也没意义 → 跳出交给用户手动处理
+                            break
+                        }
+                        bound = awaitInstance(BIND_WAIT_LONG_MS)
+                        RemoteLog.i(
+                            TAG,
+                            "tile: rebind attempt=$attempt wait bound=${bound != null} " +
+                                "elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+                        )
+                    }
+                }
+
                 mainHandler.post {
-                    Toast.makeText(appContext, R.string.toast_enable_a11y_first, Toast.LENGTH_LONG).show()
+                    val svc = bound ?: CopyAccessibilityService.instance
+                    if (svc != null) {
+                        Toast.makeText(appContext, R.string.toast_tile_auto_enabled, Toast.LENGTH_SHORT).show()
+                        RemoteLog.i(TAG, "tile: service connected, entering copy mode")
+                        svc.toggleCopyMode()
+                        mainHandler.post { updateTile(svc.isCopyModeActive) }
+                    } else {
+                        RemoteLog.w(
+                            TAG,
+                            "tile: service still unbound after recovery elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+                        )
+                        Toast.makeText(appContext, R.string.toast_tile_wait_bind, Toast.LENGTH_LONG).show()
+                        openAccessibilitySettings()
+                        updateTile(false)
+                    }
+                }
+            } catch (e: Exception) {
+                RemoteLog.e(TAG, "tile: startup failed elapsed=${SystemClock.elapsedRealtime() - startedAt}ms", e)
+                mainHandler.post {
+                    Toast.makeText(appContext, R.string.toast_tile_wait_bind, Toast.LENGTH_LONG).show()
                     openAccessibilitySettings()
                     updateTile(false)
                 }
-                return@Thread
+            } finally {
+                startupInProgress.set(false)
             }
-
-            var bound = awaitInstance(BIND_WAIT_MS)
-            if (bound == null) {
-                // 设置里已启用但服务没被系统绑定（热更新/进程死亡后的僵死状态，
-                // 设置值不变就不会触发重绑）→ 把本服务摘掉再挂回，强制系统重新 bind
-                val rebound = RootKeeper.forceRebind(appContext)
-                RemoteLog.d(TAG, "tile: enabled but unbound (instanceAtClick=$instanceAtClick), forceRebind=$rebound")
-                if (rebound) bound = awaitInstance(BIND_WAIT_LONG_MS)
-            }
-
-            mainHandler.post {
-                val svc = bound ?: CopyAccessibilityService.instance
-                if (svc != null) {
-                    Toast.makeText(appContext, R.string.toast_tile_auto_enabled, Toast.LENGTH_SHORT).show()
-                    svc.toggleCopyMode()
-                    mainHandler.post { updateTile(svc.isCopyModeActive) }
-                } else {
-                    // 强制重绑也没等到（无 root/WSS 或系统拒绝），让用户去设置页开关一次
-                    Toast.makeText(appContext, R.string.toast_tile_wait_bind, Toast.LENGTH_LONG).show()
-                    updateTile(false)
-                }
-            }
-        }.start()
+        }, "TileCopyMode").apply {
+            isDaemon = true
+            start()
+        }
     }
 
     /** 轮询等待无障碍服务连接 */
     private fun awaitInstance(timeoutMs: Long): CopyAccessibilityService? {
-        var waited = 0L
-        while (waited < timeoutMs) {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (SystemClock.elapsedRealtime() < deadline) {
             CopyAccessibilityService.instance?.let { return it }
             Thread.sleep(BIND_POLL_MS)
-            waited += BIND_POLL_MS
         }
         return CopyAccessibilityService.instance
     }

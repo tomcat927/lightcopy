@@ -9,6 +9,7 @@ import android.content.Intent
 import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
@@ -34,10 +35,14 @@ class CopyAccessibilityService : AccessibilityService() {
                 context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
             ) ?: return false
             val cn = ComponentName(context, CopyAccessibilityService::class.java)
-            return enabled.split(':').any {
+            val serviceListed = enabled.split(':').any {
                 it.equals(cn.flattenToShortString(), ignoreCase = true) ||
                     it.equals(cn.flattenToString(), ignoreCase = true)
             }
+            val accessibilityMasterOn = Settings.Secure.getInt(
+                context.contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED, 0
+            ) == 1
+            return serviceListed && accessibilityMasterOn
         }
     }
 
@@ -50,10 +55,11 @@ class CopyAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        RemoteLog.d(TAG, "accessibility service connected")
+        RemoteLog.i(TAG, "accessibility service connected")
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
+        RemoteLog.w(TAG, "accessibility service unbound")
         teardown()
         // 保活开启时排一个 20 秒后的一次性恢复：开关被 ROM 翻掉能在进程存活期间拉回
         RootKeeper.onServiceUnbound(this)
@@ -70,16 +76,32 @@ class CopyAccessibilityService : AccessibilityService() {
 
     /** 已在选择模式则先 dismiss（再点瓦片=取消），否则进入选择模式 */
     fun toggleCopyMode() {
+        RemoteLog.d(TAG, "copy mode toggle requested active=${overlay != null}")
         mainHandler.post {
             // 服务可能在排队期间被关闭（instance 已清空），此时不再加窗
-            if (instance !== this) return@post
+            if (instance !== this) {
+                RemoteLog.w(TAG, "copy mode toggle dropped: service instance changed before dispatch")
+                return@post
+            }
             if (overlay == null) enterCopyMode() else exitCopyMode()
         }
     }
 
     private fun enterCopyMode() {
         if (overlay != null) return
-        val blocks = TextBlockCollector.collect(this)
+        val startedAt = SystemClock.elapsedRealtime()
+        RemoteLog.i(TAG, "copy mode enter: collecting screen text")
+        val blocks = try {
+            TextBlockCollector.collect(this)
+        } catch (e: Exception) {
+            RemoteLog.e(TAG, "copy mode enter: text collection failed", e)
+            Toast.makeText(this, R.string.toast_no_text, Toast.LENGTH_SHORT).show()
+            return
+        }
+        RemoteLog.i(
+            TAG,
+            "copy mode enter: collected ${blocks.size} blocks in ${SystemClock.elapsedRealtime() - startedAt}ms",
+        )
         if (blocks.isEmpty()) {
             Toast.makeText(this, R.string.toast_no_text, Toast.LENGTH_SHORT).show()
             return
