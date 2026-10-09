@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.SystemClock
 import android.provider.Settings
-import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -400,6 +399,10 @@ object RootKeeper {
             append("dumpsys accessibility 2>/dev/null | grep -A 12 -E ")
             append("'^ *Bound services:|^ *Binding services:|^ *Crashed services:|^ *Enabled services:' ")
             append("| head -80; ")
+            append("echo ===BINDING-RAW===; ")
+            // 单独抓 Binding services 的原始行（不截断）：排查"卡在 Binding 永不完成"时，
+            // 这一段的每个字段（capabilities/eventTypes/notificationTimeout）是唯一线索。
+            append("dumpsys accessibility 2>/dev/null | sed -n '/Binding services/,/^ *[A-Z]/p' | head -30; ")
             append("echo ===OUR===; ")
             append("dumpsys accessibility 2>/dev/null | grep -i -B2 -A6 'lightcopy' | head -60; ")
             append("echo ===SETTINGS===; ")
@@ -412,6 +415,197 @@ object RootKeeper {
         }
         val (ok, out) = runSuCapture(script, timeoutMs = 20_000)
         return if (ok) out else "dumpsys failed: $out"
+    }
+
+    /**
+     * 该服务在系统侧是否卡在 `Binding services`（已注册但 bind 永不完成）。
+     *
+     * `Settings.Secure` 只能告诉我们"开关是开的"，看不出 bind 是否真的完成。
+     * 唯一权威来源是 `dumpsys accessibility` 的段落。**必须整段抓**：
+     * 该列表是换行展开的（每项一行 `Service[...]`），只 grep 标题行只会命中第一条。
+     *
+     * @return true = 出现在 `Binding services`；false = 没抓到（不代表一定正常）
+     */
+    fun isStuckBinding(): Boolean {
+        val script = "dumpsys accessibility 2>/dev/null | grep -A 12 '^ *Binding services:' | head -20"
+        val (ok, out) = runSuCapture(script, timeoutMs = 15_000)
+        if (!ok) {
+            RemoteLog.w(TAG, "isStuckBinding: dumpsys failed out=[$out]")
+            return false
+        }
+        val stuck = out.contains("com.tomcat927.lightcopy")
+        RemoteLog.i(TAG, "isStuckBinding=$stuck out=[${out.trim().take(400)}]")
+        return stuck
+    }
+
+    /**
+     * 进程级恢复：杀掉本进程，逼迫系统重新 bind 无障碍服务。
+     *
+     * === 为什么需要这个（10-09 17:30 实证）===
+     * 本 ROM 上 `AccessibilityManagerService` 绑定无障碍服务时要走"添加窗口"并等待客户端响应
+     * （logcat: `AccessibilityManagerService: wait for adding window timeout: <pid>`）。
+     * 当 App 进程正忙于窗口事务（冷启动闪屏销毁、QS 面板展开/收拢动画）时，这个等待会超时，
+     * 服务就永久停在 `Binding services`，`onServiceConnected` 永不触发。
+     *
+     * 实证：同一份代码，17:07 冷启动时 400ms 就 bind 成功，17:27 冷启动却一直绑不上——
+     * 差别仅在"当时的窗口事务是否与绑定撞车"。因此"反复改设置"救不回来
+     * （设置值早已是对的，su 回显证明每步写入都真实生效），
+     * 必须让系统**重新发起一次 bind**，而进程死亡是最可靠的触发方式：
+     * 服务仍在 enabled 列表里 → 系统在进程重启后会自动重新绑定它。
+     *
+     * 前提：服务必须仍列在 enabled 列表里（否则进程死后没人会来 bind 我们）。
+     * 调用方应先确保 [ensureServiceEnabled] 已返回 true。
+     *
+     * 用 `am force-stop` 而不是 `Process.killProcess`：force-stop 由系统执行，
+     * 会同时清掉我们的 Activity/Service 栈，避免"进程刚死又被自己的前台组件拉活"
+     * 导致根本没重启干净。杀完立刻由调用方（瓦片/通知）侧的显式拉起兜底。
+     */
+    /**
+     * 进程级恢复：杀掉本进程，逼迫系统重新 bind 无障碍服务。
+     *
+     * === 为什么需要这个（10-09 17:30 实证）===
+     * 本 ROM 上 `AccessibilityManagerService` 绑定无障碍服务时要走"添加窗口"并等待客户端响应
+     * （logcat: `AccessibilityManagerService: wait for adding window timeout: <pid>`）。
+     * 当 App 进程正忙于窗口事务（冷启动闪屏销毁、QS 面板展开/收拢动画）时，这个等待会超时，
+     * 服务就永久停在 `Binding services`，`onServiceConnected` 永不触发。
+     *
+     * 实证：同一份代码，17:07 冷启动时 400ms 就 bind 成功，17:27 冷启动却一直绑不上——
+     * 差别仅在"当时的窗口事务是否与绑定撞车"。因此"反复改设置"救不回来
+     * （设置值早已是对的，su 回显证明每步写入都真实生效），
+     * 必须让系统**重新发起一次 bind**，而进程死亡是最可靠的触发方式：
+     * 服务仍在 enabled 列表里 → 系统在进程重启后会重新绑定它。
+     *
+     * === 为什么是 killProcess 而不是 am force-stop ===
+     * `am force-stop` 会把 App 标记为 stopped（等同用户在设置里「强行停止」），
+     * 之后系统**不会**自动重新 bind 它的无障碍服务 —— 需要用户手动去设置里再开一次，
+     * 等于把用户踢回原点，比不做还糟。
+     * `Process.killProcess(pid)` 只杀进程、不改 stopped 标记：
+     * 无障碍服务仍列在 enabled 列表中，系统会在 ready 时**自动重新 bind 新进程**，
+     * 这才是无障碍保活领域的标准手法。
+     *
+     * 用 su 执行 `kill -9 <pid>` 而非直接 `Process.killProcess`：
+     * 后者受 Android 对自有进程的"自杀"限制、且会立即中断本线程导致日志写不出去；
+     * 走 su 还能在杀之前把诊断信息落盘。
+     *
+     * 前提：服务必须仍列在 enabled 列表里（否则进程死后没人会来 bind 我们）。
+     * 调用方应先确保 [ensureServiceEnabled] 已返回 true。
+     */
+    fun resetProcessForRebind(): Boolean {
+        val pid = android.os.Process.myPid()
+        val pkg = "com.tomcat927.lightcopy"
+        // 先落盘诊断（杀进程后本进程日志就断了），再自杀。
+        RemoteLog.w(
+            TAG,
+            "resetProcessForRebind: killing own pid=$pid pkg=$pkg to force a fresh accessibility bind",
+        )
+        RemoteLog.w(TAG, "resetProcessForRebind: state before kill [${dumpAccessibilityState()}]")
+        // 延迟一点点执行 kill，确保上面的日志已经刷进 RemoteLog 缓冲/文件。
+        val script = "sleep 1; kill -9 $pid; echo kill-returned=\$?"
+        val (ok, out) = runSuCapture(script, timeoutMs = 8_000)
+        RemoteLog.i(TAG, "resetProcessForRebind returned ok=$ok out=[$out]")
+        return ok
+    }
+
+    /** 置顶一个"等待系统清理上一次超时 bind"的静默期，避免新请求被视为重复。 */
+    private const val STUCK_CLEAR_WAIT_MS = 1_500L
+
+    /** 进程级重启开关：默认关（该手段尚未在真机验证，贸然启用可能让 App 彻底失联）。 */
+    private const val KEY_PROCESS_RESET_ON = "process_reset_on"
+
+    fun isProcessResetOn(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_PROCESS_RESET_ON, false)
+
+    fun setProcessResetOn(context: Context, on: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_PROCESS_RESET_ON, on).apply()
+    }
+
+    /**
+     * "空闲时机"版绑定恢复：确保服务被系统真正 bind 上，而不是只把开关写对。
+     *
+     * 这是瓦片/启动路径与纯后台 [ensureServiceEnabled] 的区别所在：
+     *   - [ensureServiceEnabled] 只管把 `Settings.Secure` 写对，它假设"系统随后会自己 bind"，
+     *     这条假设在"开关早已为 true"的停滞态下**不成立**（设置值不变 → 系统不重新评估）。
+     *   - 本方法在写对之后还会**确认是否有实例**，没有就做一次轻量重绑（摘除→挂回，
+     *     产生一次列表变更）。仍绑不上的话，仅记录诊断并返回 false；
+     *     进程级重启（`resetProcessForRebind`）需显式开启 `process_reset_on` 才执行。
+     *
+     * 调用方必须是"已无窗口事务"的场景（例如 Activity 启动 6 秒后、后台 Worker），
+     * 否则会和 bind 的"添加窗口"步骤抢资源、重现超时。
+     *
+     * @return true = 最终拿到了服务实例（或设置层面已就绪且无需恢复）
+     */
+    fun recoverBindingWhenIdle(context: Context): Boolean {
+        val startedAt = SystemClock.elapsedRealtime()
+        if (CopyAccessibilityService.instance != null) {
+            RemoteLog.d(TAG, "recoverBindingWhenIdle: already bound, nothing to do")
+            return true
+        }
+        if (!ensureServiceEnabled(context)) {
+            RemoteLog.w(TAG, "recoverBindingWhenIdle: service not enabled in settings, abort (need user action)")
+            return false
+        }
+        // 已经写对了设置，但实例仍为空 → 处于"已启用但未绑定"的停滞态。
+        RemoteLog.w(
+            TAG,
+            "recoverBindingWhenIdle: enabled in settings but no instance, attempting rebind " +
+                "sinceProcStartMs=${SystemClock.elapsedRealtime() - CopyAccessibilityService.processStartAt}",
+        )
+        // 先让系统把上一次超时的 bind 请求清理掉，避免新请求被当成重复而忽略。
+        Thread.sleep(STUCK_CLEAR_WAIT_MS)
+
+        val rebound = forceRebind(context)
+        RemoteLog.i(
+            TAG,
+            "recoverBindingWhenIdle: forceRebind=$rebound elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+        )
+        // 绑定是异步的，给足窗口期再判定
+        val bound = awaitInstance(BIND_VERIFY_TIMEOUT_MS)
+        if (bound != null) {
+            RemoteLog.i(
+                TAG,
+                "recoverBindingWhenIdle: bound after rebind elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+            )
+            return true
+        }
+
+        // 轻量重绑后仍无实例 → 僵死态。
+        //
+        // 此时只剩下"让系统重新发起 bind"这一条路。本 ROM 上唯一可靠的触发方式是进程死亡
+        // （服务仍在 enabled 列表，系统会在进程重启后重新 bind）——但**这条尚未在真机验证过**：
+        // 如果系统不主动拉起，App 会直接消失、服务彻底失联，比现状更糟。
+        // 因此默认**不执行**，只在日志里留下明确的诊断结论，等确认安全后再开。
+        val stuck = isStuckBinding()
+        RemoteLog.w(
+            TAG,
+            "recoverBindingWhenIdle: still unbound after rebind stuckBinding=$stuck " +
+                "elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+        )
+        if (!isProcessResetOn(context)) {
+            RemoteLog.w(
+                TAG,
+                "recoverBindingWhenIdle: process-reset disabled (default), leaving as-is. " +
+                    "state dump [${dumpAccessibilityState()}]",
+            )
+            return false
+        }
+        RemoteLog.w(TAG, "recoverBindingWhenIdle: process-reset enabled, escalating. state [${dumpAccessibilityState()}]")
+        return resetProcessForRebind()
+    }
+
+    /** 等待服务实例出现的轮询间隔与上限（并入重绑后的判定窗口） */
+    private const val BIND_VERIFY_TIMEOUT_MS = 6_000L
+    private const val BIND_VERIFY_POLL_MS = 150L
+
+    /** 轮询等待无障碍服务实例出现；超时返回 null */
+    private fun awaitInstance(timeoutMs: Long): CopyAccessibilityService? {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (SystemClock.elapsedRealtime() < deadline) {
+            CopyAccessibilityService.instance?.let { return it }
+            Thread.sleep(BIND_VERIFY_POLL_MS)
+        }
+        return CopyAccessibilityService.instance
     }
 }
 
@@ -429,16 +623,31 @@ class KeepAliveWorker(
         // 巡检顺带触发日志上传（待传超阈值才发，平时零流量）
         RemoteLog.maybeUpload("keepalive-work")
         if (!RootKeeper.isKeepAliveOn(context)) return Result.success()
-        if (CopyAccessibilityService.isSelfEnabled(context)) return Result.success()
+
+        // 注意：这里不能只判断 `isSelfEnabled`（那只看设置值）。
+        // 实测存在"设置里已启用、但服务永远绑不上"的停滞态 —— 此时设置值是对的，
+        // 只看设置会直接 return，永远不会尝试恢复，问题永远自愈不了。
+        // 正确的判据是"有没有真的拿到服务实例"。
+        if (CopyAccessibilityService.instance != null) return Result.success()
 
         val prefs = context.getSharedPreferences("lightcopy_prefs", Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
         if (now - prefs.getLong("last_recovery_ms", 0) < 30_000L) return Result.success()
 
-        if (RootKeeper.ensureServiceEnabled(context)) {
-            prefs.edit().putLong("last_recovery_ms", now).apply()
-            Toast.makeText(context, R.string.toast_keepalive_recovered, Toast.LENGTH_SHORT).show()
+        // Worker 是最理想的恢复时机：纯后台、无任何窗口事务，不会与 bind 的
+        // "添加窗口"步骤抢资源（这与瓦片/Activity 启动路径形成对照）。
+        // recoverBindingWhenIdle 内部会：写对设置 → 轻量重绑 → 仍失败则进程级重启。
+        val recovered = withContext(Dispatchers.IO) {
+            RootKeeper.recoverBindingWhenIdle(context)
         }
+        prefs.edit().putLong("last_recovery_ms", now).apply()
+        // 后台不放 Toast（Android 10+ 后台 Toast 会被系统丢弃，
+        // logcat 可见 `NotificationService: Toast already killed`），只用日志记录。
+        RemoteLog.i(TAG_WORKER, "keepalive worker: recovery done recovered=$recovered")
         return Result.success()
+    }
+
+    private companion object {
+        const val TAG_WORKER = "LightCopy"
     }
 }

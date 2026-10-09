@@ -38,6 +38,14 @@ class CopyAccessibilityService : AccessibilityService() {
         private const val COLLECT_RETRY_WAIT_MS = 250L
         private const val COLLECT_MAX_ATTEMPTS = 4
 
+        /**
+         * 本进程的启动时刻（elapsedRealtime 基准）。
+         * 用于在日志里量化"服务 connect/unbind 距进程启动过了多久"——
+         * 实测本 ROM 上无障碍 bind 会被进程早期的窗口事务（启动闪屏销毁）打断，
+         * 这个时间差是判断是否撞上敏感窗口期的关键证据。
+         */
+        val processStartAt: Long = android.os.SystemClock.elapsedRealtime()
+
         @Volatile
         var instance: CopyAccessibilityService? = null
             private set
@@ -73,11 +81,23 @@ class CopyAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        RemoteLog.i(TAG, "accessibility service connected")
+        // 带上 pid 与进程启动时长：排查"绑定超时/绑不上"时，必须能对齐
+        // `AccessibilityManagerService: wait for adding window timeout: <pid>` 里的 pid，
+        // 并判断这次 bind 是否发生在进程刚启动（窗口事务未结束）的敏感窗口期。
+        RemoteLog.i(
+            TAG,
+            "accessibility service connected pid=${android.os.Process.myPid()} " +
+                "uptimeMs=${android.os.SystemClock.elapsedRealtime()} " +
+                "sinceProcStartMs=${android.os.SystemClock.elapsedRealtime() - processStartAt}",
+        )
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
-        RemoteLog.w(TAG, "accessibility service unbound")
+        RemoteLog.w(
+            TAG,
+            "accessibility service unbound pid=${android.os.Process.myPid()} " +
+                "sinceProcStartMs=${android.os.SystemClock.elapsedRealtime() - processStartAt}",
+        )
         teardown()
         // 保活开启时排一个 20 秒后的一次性恢复：开关被 ROM 翻掉能在进程存活期间拉回
         RootKeeper.onServiceUnbound(this)

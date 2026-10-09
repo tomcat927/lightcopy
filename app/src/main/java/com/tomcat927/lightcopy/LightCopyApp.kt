@@ -23,6 +23,15 @@ class LightCopyApp : Application() {
 
         // 启动时把上次会话遗留的待传日志发出去
         RemoteLog.upload("app-start", null)
+        // 进程启动快照：排查"无障碍 bind 被启动窗口事务打断"时，
+        // 必须能把 `AccessibilityManagerService: wait for adding window timeout: <pid>`
+        // 与我们自己的 pid 对齐，并知道这是不是一次冷启动（对照 processStartAt）。
+        RemoteLog.i(
+            "LightCopy",
+            "app process start pid=${android.os.Process.myPid()} " +
+                "bindEnabled=${CopyAccessibilityService.isSelfEnabled(this)} " +
+                "instance=${CopyAccessibilityService.instance != null}",
+        )
         Log.d("LightCopy", "app process start")
 
         // 每 6 小时后台检查并预下载更新（关掉 app 也在跑）

@@ -33,8 +33,16 @@ class CopyModeTileService : TileService() {
          */
         private const val BIND_WAIT_LONG_MS = 6_000L
         private const val BIND_POLL_MS = 100L
-        /** 重绑轮数：温和重绑一次足矣，多轮反而在系统里制造噪音 */
-        private const val REBIND_MAX_ATTEMPTS = 1
+        /**
+         * 点瓦片后、开始恢复绑定前，等 QS 面板收起动画走完的时间。
+         *
+         * 为什么必须等：本 ROM 的 AccessibilityManagerService 绑定无障碍服务时要走
+         * "添加窗口"并等待客户端响应，而 QS 面板的展开/收拢动画会与它抢窗口资源 →
+         * 绑定超时 → 服务永久卡在 `Binding services`（logcat:
+         * `wait for adding window timeout: <pid>`）。实测"纯后台无窗口事务"的恢复路径
+         * 能在 150ms 内绑上，而"瓦片点击（面板展开中）"路径必失败。
+         */
+        private const val QS_SETTLE_WAIT_MS = 2_000L
         private val startupInProgress = AtomicBoolean(false)
     }
 
@@ -102,39 +110,31 @@ class CopyModeTileService : TileService() {
                 )
                 if (bound == null) {
                     // 设置里已启用但服务没被系统绑定（热更新/进程死亡后的僵死状态，
-                    // 设置值不变就不会触发重绑）→ 把本服务摘掉再挂回，让系统按列表变更重新 bind。
+                    // 设置值不变就不会触发重绑）。
                     //
-                    // 注意：重绑**不再翻转总开关**（见 RootKeeper.forceRebind 注释）。
-                    // 实证翻转总开关会让本 ROM 在批量重绑中丢掉大部分服务，
-                    // 既救不活自己、也会打断用户其它正在并行的无障碍服务。
-                    //
-                    // 重绑前后各抓一次 dumpsys：万一重绑仍不成功，也能看到
-                    // 它有没有把别人（全局复制/AutoJS/华硕/广告锤子）从 Bound 里打掉。
+                    // 关键修正：**要等 QS 面板彻底收起**再恢复。用户点瓦片 = 面板展开/动画中，
+                    // 而本 ROM 的 AccessibilityManagerService 在 bind 时要走"添加窗口"并等待
+                    // 客户端响应，面板动画会与它抢资源 → 超时 → 服务永久卡在 Binding services
+                    // （logcat 实证 `wait for adding window timeout`）。
+                    // 因此这里先静默 2 秒让面板动画走完，再交给统一的空闲恢复流程。
                     RemoteLog.i(
                         TAG,
-                        "tile: pre-rebind state dump [${RootKeeper.dumpAccessibilityState()}]",
+                        "tile: unbound, waiting for QS panel to settle before recovery " +
+                            "sinceProcStartMs=${SystemClock.elapsedRealtime() - CopyAccessibilityService.processStartAt}",
                     )
-                    var attempt = 0
-                    while (bound == null && attempt < REBIND_MAX_ATTEMPTS) {
-                        attempt++
-                        val rebound = RootKeeper.forceRebind(appContext)
-                        RemoteLog.i(
-                            TAG,
-                            "tile: force rebind attempt=$attempt result=$rebound " +
-                                "elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
-                        )
-                        if (!rebound) {
-                            // 设置层没写成功（无 root/WSS，或服务已不在启用列表），
-                            // 再重试也没意义 → 跳出交给用户手动处理
-                            break
-                        }
-                        bound = awaitInstance(BIND_WAIT_LONG_MS)
-                        RemoteLog.i(
-                            TAG,
-                            "tile: rebind attempt=$attempt wait bound=${bound != null} " +
-                                "elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
-                        )
-                    }
+                    Thread.sleep(QS_SETTLE_WAIT_MS)
+                    RemoteLog.i(
+                        TAG,
+                        "tile: pre-recovery state dump [${RootKeeper.dumpAccessibilityState()}]",
+                    )
+                    // 统一走"空闲时机恢复"：写对设置 → 轻量重绑 → 仍不行则进程级重启。
+                    RootKeeper.recoverBindingWhenIdle(appContext)
+                    bound = awaitInstance(BIND_WAIT_LONG_MS)
+                    RemoteLog.i(
+                        TAG,
+                        "tile: after recoverBindingWhenIdle bound=${bound != null} " +
+                            "elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+                    )
                 }
 
                 mainHandler.post {

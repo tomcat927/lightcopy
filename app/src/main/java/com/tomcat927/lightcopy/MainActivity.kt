@@ -110,7 +110,23 @@ class MainActivity : ComponentActivity() {
 
             // 保活开启时，打开 app 顺带兜底恢复一次（不等 WorkManager 巡检）
             if (RootKeeper.isKeepAliveOn(this@MainActivity)) {
-                lifecycleScope.launch { RootKeeper.ensureServiceEnabled(applicationContext) }
+                // 关键：**不能在这一刻立刻恢复**。Activity 刚显示时启动闪屏正在销毁，
+                // 窗口事务与无障碍 bind 会撞车（logcat 实证：
+                // `AccessibilityManagerService: wait for adding window timeout: <pid>`），
+                // 导致服务卡在 `Binding services` 永不完成。
+                // 因此推迟到窗口事务结束后（延迟 6 秒）再执行，并打印当时的进程龄供核对。
+                lifecycleScope.launch {
+                    kotlinx.coroutines.delay(6_000)
+                    // 切到 IO：方法内部有阻塞式 sleep/轮询与 su 调用，不能占主线程
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        RemoteLog.i(
+                            "LightCopy",
+                            "main: deferred recovery begin sinceProcStartMs=" +
+                                (android.os.SystemClock.elapsedRealtime() - CopyAccessibilityService.processStartAt),
+                        )
+                        RootKeeper.recoverBindingWhenIdle(applicationContext)
+                    }
+                }
             }
 
             // Root 保活开关状态：默认关，打开时才请求 root（绝不启动时偷弹 su）
@@ -135,7 +151,10 @@ class MainActivity : ComponentActivity() {
                             if (granted) {
                                 keepAliveOn = true
                                 RootKeeper.setKeepAliveOn(appContext, true)
-                                RootKeeper.ensureServiceEnabled(appContext)
+                                // 切到 IO 线程：recoverBindingWhenIdle 内部有阻塞式 sleep/轮询与 su 调用
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                    RootKeeper.recoverBindingWhenIdle(appContext)
+                                }
                                 Toast.makeText(appContext, R.string.toast_keepalive_on, Toast.LENGTH_SHORT).show()
                             } else {
                                 Toast.makeText(appContext, R.string.toast_keepalive_no_root, Toast.LENGTH_LONG).show()
