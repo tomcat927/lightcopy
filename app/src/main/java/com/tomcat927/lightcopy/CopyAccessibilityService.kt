@@ -35,9 +35,14 @@ class CopyAccessibilityService : AccessibilityService() {
                 context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
             ) ?: return false
             val cn = ComponentName(context, CopyAccessibilityService::class.java)
+            // 列表可能被第三方工具写入空条目/尾部多余分隔符，split 后要过滤空串再比较，
+            // 否则空条目既会干扰匹配判断，也说明这份列表本身是脏的。
             val serviceListed = enabled.split(':').any {
-                it.equals(cn.flattenToShortString(), ignoreCase = true) ||
-                    it.equals(cn.flattenToString(), ignoreCase = true)
+                val item = it.trim()
+                item.isNotEmpty() && (
+                    item.equals(cn.flattenToShortString(), ignoreCase = true) ||
+                        item.equals(cn.flattenToString(), ignoreCase = true)
+                    )
             }
             val accessibilityMasterOn = Settings.Secure.getInt(
                 context.contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED, 0

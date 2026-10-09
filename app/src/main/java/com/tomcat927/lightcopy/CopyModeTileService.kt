@@ -127,9 +127,15 @@ class CopyModeTileService : TileService() {
                         svc.toggleCopyMode()
                         mainHandler.post { updateTile(svc.isCopyModeActive) }
                     } else {
+                        // 走到这里说明设置层面全部成功但系统始终不 bind。
+                        // 只有系统视角（dumpsys）能解释原因，务必抓下来。
                         RemoteLog.w(
                             TAG,
                             "tile: service still unbound after recovery elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+                        )
+                        RemoteLog.w(
+                            TAG,
+                            "tile: accessibility state dump [${RootKeeper.dumpAccessibilityState()}]",
                         )
                         Toast.makeText(appContext, R.string.toast_tile_wait_bind, Toast.LENGTH_LONG).show()
                         openAccessibilitySettings()

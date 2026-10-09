@@ -47,6 +47,23 @@ object RootKeeper {
      */
     private const val REBIND_EMPTY_SENTINEL = "com.tomcat927.lightcopy/.RebindNoop"
 
+    /**
+     * 清洗 `enabled_accessibility_services` 列表。
+     *
+     * 该设置是冒号分隔的组件名列表，但实机环境里常被第三方工具（自动化脚本、广告拦截、
+     * 各种「助手」类 App）写入脏数据：空条目、重复项、尾部多余分隔符。
+     * 10-09 实测回显出现 `A:B:C:com.tomcat927.lightcopy/.CopyAccessibilityService::D`——
+     * 中间夹空条目。系统解析这种列表时行为未定义，很可能直接拒绝启用整份列表，
+     * 于是服务"设置里看着是启用的，实际永远绑不上"。
+     * 因此凡是写回该设置的地方，都必须先过这个清洗。
+     */
+    private fun sanitizeList(raw: String): String =
+        raw.split(':')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+            .joinToString(":")
+
     fun isKeepAliveOn(context: Context): Boolean =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getBoolean(KEY_KEEPALIVE_ON, false)
@@ -84,8 +101,10 @@ object RootKeeper {
         val current = Settings.Secure.getString(
             cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         ) ?: ""
-        // 合并而非覆盖：用户可能同时开着 MT 管理器等其他无障碍服务
+        // 合并而非覆盖：用户可能同时开着 MT 管理器等其他无障碍服务。
+        // 同时清洗脏数据（空条目/重复项），否则系统可能拒绝启用整份列表。
         val merged = current.split(':')
+            .map { it.trim() }
             .filter { it.isNotBlank() }
             .toMutableList()
             .apply {
@@ -93,6 +112,7 @@ object RootKeeper {
                     add(flat)
                 }
             }
+            .distinct()
             .joinToString(":")
             .ifBlank { flat }
         val hasWriteSecureSettings = ContextCompat.checkSelfPermission(
@@ -161,11 +181,14 @@ object RootKeeper {
         val cn = ComponentName(context, CopyAccessibilityService::class.java)
         val short = cn.flattenToShortString()
         val full = cn.flattenToString()
-        val current = Settings.Secure.getString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+        val currentRaw = Settings.Secure.getString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
             ?: run {
                 RemoteLog.w(TAG, "force rebind skipped: enabled services setting is null")
                 return false
             }
+        // 关键：先清洗再判断/再写回。
+        // 脏列表（空条目/重复项）会让系统解析失败，表现为"设置了但永远绑不上"。
+        val current = sanitizeList(currentRaw)
         if (current.split(':').none { it.equals(short, true) || it.equals(full, true) }) {
             RemoteLog.w(TAG, "force rebind skipped: service is not listed in enabled services")
             return false
@@ -175,6 +198,13 @@ object RootKeeper {
             .joinToString(":")
         // 空列表哨兵：确保"摘除"这一步一定是一次可见的状态变更
         val without = withoutRaw.ifBlank { REBIND_EMPTY_SENTINEL }
+        if (currentRaw != current) {
+            RemoteLog.w(
+                TAG,
+                "force rebind: enabled services list was dirty, sanitized " +
+                    "(before='$currentRaw' after='$current')",
+            )
+        }
         return try {
             if (ContextCompat.checkSelfPermission(
                     context, Manifest.permission.WRITE_SECURE_SETTINGS
@@ -217,7 +247,11 @@ object RootKeeper {
                     append("echo step=restore; settings put secure enabled_accessibility_services '$current'; ")
                     append("echo afterRestore=\$(settings get secure enabled_accessibility_services); ")
                     append("echo step=on; settings put secure accessibility_enabled 1; ")
-                    append("echo afterOn=\$(settings get secure accessibility_enabled)")
+                    append("echo afterOn=\$(settings get secure accessibility_enabled); ")
+                    // 稳定期后再读一次：若与 afterRestore 不同，说明有第三方工具
+                    // （自动化脚本/助手类 App）正在同时改写这份列表，与我们的重绑互相打架。
+                    append("sleep 2; echo settleList=\$(settings get secure enabled_accessibility_services); ")
+                    append("echo settleMaster=\$(settings get secure accessibility_enabled)")
                 }
                 val (suSucceeded, suOut) = runSuCapture(script, timeoutMs = 20_000)
                 Thread.sleep(REBIND_SETTLE_MS)
@@ -312,6 +346,21 @@ object RootKeeper {
 
     private fun runSu(command: String, timeoutMs: Long = 5_000): Boolean =
         runSuCapture(command, timeoutMs).first
+
+    /**
+     * 采集系统无障碍服务的真实绑定状态（`dumpsys accessibility` 摘要）。
+     *
+     * 为什么必须用这个：App 层能读到的只有 `Settings.Secure` 里的开关值，
+     * 而"设置说启用、系统不绑定"这种状态，设置值是看不出原因的。
+     * `dumpsys accessibility` 里的 `Bound services` / `Enabled services` 才是系统视角的事实，
+     * 也是判断"服务是否被系统接受"的唯一权威依据。
+     */
+    fun dumpAccessibilityState(): String {
+        val script = "dumpsys accessibility 2>/dev/null | grep -iE " +
+            "'Bound services|Enabled services|binding|Crashed|dead|not responded' | head -40"
+        val (ok, out) = runSuCapture(script, timeoutMs = 10_000)
+        return if (ok) out else "dumpsys failed: $out"
+    }
 }
 
 /**
