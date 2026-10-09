@@ -5,8 +5,20 @@ import android.util.Log
 
 class LightCopyApp : Application() {
 
+    companion object {
+        /**
+         * 进程内唯一的 Application 引用。
+         * 供 [RootKeeper] 里那些按签名拿不到 Context 的方法（如 `resetProcessForRebind()`）
+         * 读取"主动重绑开关"等偏好设置，避免为了一个布尔值而给这些方法强加 Context 参数。
+         */
+        @Volatile
+        var instance: LightCopyApp? = null
+            private set
+    }
+
     override fun onCreate() {
         super.onCreate()
+        instance = this
         RemoteLog.sessionStart(this)
 
         // 崩溃捕获：落盘 + 尽力上传，再交回系统默认处理

@@ -18,6 +18,8 @@
     <string name="toast_tile_auto_enabled">无障碍服务已连接，正在进入复制模式</string>
     <string name="toast_tile_starting">正在连接无障碍服务，连接后将进入屏幕文字选择模式…</string>
     <string name="toast_tile_wait_bind">无障碍服务仍未连接，请在设置中关闭后重新开启「轻复制」服务</string>
+    <string name="toast_tile_need_manual_toggle">无障碍服务已启用但未连接，请在设置里把「轻复制」关一次再打开</string>
+    <string name="toast_need_manual_toggle">无障碍服务未连接：请在系统设置里把「轻复制」关一次再打开</string>
 
     <string name="remote_log_title">远程日志</string>
     <string name="remote_log_desc_on">已开启：诊断日志将上传到 OpenList（每次一个独立文件，不含复制内容）</string>
@@ -69,6 +71,11 @@
     <string name="keepalive_desc_on">保活中：无障碍服务被关闭时自动恢复（每 15 分钟巡检）</string>
     <string name="keepalive_desc_off">开启后将请求 root 权限，在无障碍服务被关闭时自动恢复</string>
     <string name="toast_keepalive_on">已开启 Root 保活</string>
+    <string name="toast_keepalive_on_need_toggle">已开启 Root 保活；但无障碍服务当前未连接，请到设置里关一次再打开</string>
+
+    <string name="rebind_title">主动重绑（实验）</string>
+    <string name="rebind_desc_off">已关闭（推荐）：只检测服务状态并引导你手动关/开一次，不自动改写系统设置</string>
+    <string name="rebind_desc_on">已开启：检测到未连接时会自动改写无障碍设置并强制重绑（可能加剧服务卡死）</string>
     <string name="toast_keepalive_no_root">未获得 root 授权，保活未开启</string>
     <string name="toast_keepalive_recovered">无障碍服务已自动恢复</string>
 </resources>

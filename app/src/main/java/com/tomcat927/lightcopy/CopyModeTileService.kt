@@ -27,22 +27,7 @@ class CopyModeTileService : TileService() {
          * 面板收起改由无障碍服务用 performGlobalAction 完成，不在此处造窗口，无额外延迟。
          */
         private const val BIND_WAIT_MS = 3_000L
-        /**
-         * 重绑后的等待。重绑现在是「摘除 700ms → 挂回 → settle 1200ms」，
-         * 不再翻转总开关（实证翻转会让系统重绑时丢服务），所以不必给太久。
-         */
-        private const val BIND_WAIT_LONG_MS = 6_000L
         private const val BIND_POLL_MS = 100L
-        /**
-         * 点瓦片后、开始恢复绑定前，等 QS 面板收起动画走完的时间。
-         *
-         * 为什么必须等：本 ROM 的 AccessibilityManagerService 绑定无障碍服务时要走
-         * "添加窗口"并等待客户端响应，而 QS 面板的展开/收拢动画会与它抢窗口资源 →
-         * 绑定超时 → 服务永久卡在 `Binding services`（logcat:
-         * `wait for adding window timeout: <pid>`）。实测"纯后台无窗口事务"的恢复路径
-         * 能在 150ms 内绑上，而"瓦片点击（面板展开中）"路径必失败。
-         */
-        private const val QS_SETTLE_WAIT_MS = 2_000L
         private val startupInProgress = AtomicBoolean(false)
     }
 
@@ -78,87 +63,70 @@ class CopyModeTileService : TileService() {
             return
         }
 
-        // 先给用户明确反馈。root 首次授权可能要等用户在 Magisk/KernelSU 中确认，
-        // 但所有阻塞操作都留在后台线程，不能让瓦片看起来像完全没响应。
+        // 先给用户明确反馈。所有阻塞操作都留在后台线程，
+        // 不能让瓦片看起来像完全没响应。
         Toast.makeText(this, R.string.toast_tile_starting, Toast.LENGTH_LONG).show()
         val appContext = applicationContext
         Thread({
             val startedAt = SystemClock.elapsedRealtime()
             try {
+                // === 方案 C：只检测 + 引导，绝不写设置、绝不重绑 ===
+                // 原因：本 ROM 上每次写 `enabled_accessibility_services` 都会触发一次新的 bind，
+                // 而 bind 要走「添加窗口」，被窗口事务（尤其 QS 面板动画、App 冷启动闪屏）打断后
+                // 就永久停在 `Binding services`。实测重绑次数与卡死次数正相关、与服务真正连通负相关。
+                // 因此这里不再尝试"自动修复"，只判断状态并引导用户手动关/开一次
+                // （这是 AutoJS6 等成熟实现验证过的唯一稳定做法）。
+                val state = RootKeeper.checkBinding(appContext)
                 RemoteLog.i(
                     TAG,
-                    "tile: service recovery begin enabled=${CopyAccessibilityService.isSelfEnabled(appContext)}",
+                    "tile: click state=$state elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
                 )
-                val enabled = RootKeeper.ensureServiceEnabled(appContext, suTimeoutMs = 15_000L)
+
+                // 已绑上：直接进入复制模式。
+                if (state == RootKeeper.BindingCheck.BOUND) {
+                    val svc = CopyAccessibilityService.instance
+                    if (svc != null) {
+                        mainHandler.post {
+                            svc.toggleCopyMode()
+                            mainHandler.post { updateTile(svc.isCopyModeActive) }
+                        }
+                        return@Thread
+                    }
+                }
+
+                // 未绑上：给系统一点点时间（刚开机/刚更新后的首次 bind 可能正在路上），
+                // 短暂等待可以避免误报，也绝不涉及任何设置写入。
+                val bound = awaitInstance(BIND_WAIT_MS)
                 RemoteLog.i(
                     TAG,
-                    "tile: enable attempt result=$enabled elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+                    "tile: initial bind wait bound=${bound != null} " +
+                        "elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
                 )
-                if (!enabled) {
+                if (bound != null) {
                     mainHandler.post {
-                        Toast.makeText(appContext, R.string.toast_enable_a11y_first, Toast.LENGTH_LONG).show()
-                        openAccessibilitySettings()
-                        updateTile(false)
+                        Toast.makeText(appContext, R.string.toast_tile_auto_enabled, Toast.LENGTH_SHORT).show()
+                        bound.toggleCopyMode()
+                        mainHandler.post { updateTile(bound.isCopyModeActive) }
                     }
                     return@Thread
                 }
 
-                var bound = awaitInstance(BIND_WAIT_MS)
-                RemoteLog.i(
+                // 仍未绑上 → 只引导，不动设置。
+                RemoteLog.w(
                     TAG,
-                    "tile: initial bind wait bound=${bound != null} elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+                    "tile: service not bound (state=$state), guiding user to system settings " +
+                        "(no settings write, no rebind). " +
+                        "stateDump=[${RootKeeper.dumpAccessibilityState()}]",
                 )
-                if (bound == null) {
-                    // 设置里已启用但服务没被系统绑定（热更新/进程死亡后的僵死状态，
-                    // 设置值不变就不会触发重绑）。
-                    //
-                    // 关键修正：**要等 QS 面板彻底收起**再恢复。用户点瓦片 = 面板展开/动画中，
-                    // 而本 ROM 的 AccessibilityManagerService 在 bind 时要走"添加窗口"并等待
-                    // 客户端响应，面板动画会与它抢资源 → 超时 → 服务永久卡在 Binding services
-                    // （logcat 实证 `wait for adding window timeout`）。
-                    // 因此这里先静默 2 秒让面板动画走完，再交给统一的空闲恢复流程。
-                    RemoteLog.i(
-                        TAG,
-                        "tile: unbound, waiting for QS panel to settle before recovery " +
-                            "sinceProcStartMs=${SystemClock.elapsedRealtime() - CopyAccessibilityService.processStartAt}",
-                    )
-                    Thread.sleep(QS_SETTLE_WAIT_MS)
-                    RemoteLog.i(
-                        TAG,
-                        "tile: pre-recovery state dump [${RootKeeper.dumpAccessibilityState()}]",
-                    )
-                    // 统一走"空闲时机恢复"：写对设置 → 确认实例 → 轻量重绑 → 轮询确认。
-                    RootKeeper.recoverBindingWhenIdle(appContext)
-                    bound = awaitInstance(BIND_WAIT_LONG_MS)
-                    RemoteLog.i(
-                        TAG,
-                        "tile: after recoverBindingWhenIdle bound=${bound != null} " +
-                            "elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
-                    )
-                }
-
                 mainHandler.post {
-                    val svc = bound ?: CopyAccessibilityService.instance
-                    if (svc != null) {
-                        Toast.makeText(appContext, R.string.toast_tile_auto_enabled, Toast.LENGTH_SHORT).show()
-                        RemoteLog.i(TAG, "tile: service connected, entering copy mode")
-                        svc.toggleCopyMode()
-                        mainHandler.post { updateTile(svc.isCopyModeActive) }
+                    val msgRes = if (state == RootKeeper.BindingCheck.ENABLED_ONLY) {
+                        R.string.toast_tile_need_manual_toggle
                     } else {
-                        // 走到这里说明设置层面全部成功但系统始终不 bind。
-                        // 只有系统视角（dumpsys）能解释原因，务必抓下来。
-                        RemoteLog.w(
-                            TAG,
-                            "tile: service still unbound after recovery elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
-                        )
-                        RemoteLog.w(
-                            TAG,
-                            "tile: accessibility state dump [${RootKeeper.dumpAccessibilityState()}]",
-                        )
-                        Toast.makeText(appContext, R.string.toast_tile_wait_bind, Toast.LENGTH_LONG).show()
-                        openAccessibilitySettings()
-                        updateTile(false)
+                        R.string.toast_enable_a11y_first
                     }
+                    Toast.makeText(appContext, msgRes, Toast.LENGTH_LONG).show()
+                    openAccessibilitySettings()
+                    updateTile(false)
                 }
             } catch (e: Exception) {
                 RemoteLog.e(TAG, "tile: startup failed elapsed=${SystemClock.elapsedRealtime() - startedAt}ms", e)

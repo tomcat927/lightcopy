@@ -108,23 +108,27 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // 保活开启时，打开 app 顺带兜底恢复一次（不等 WorkManager 巡检）
+            // 保活开启时，打开 app 顺带检测一次绑定状态（方案 C：只检测，不写设置、不重绑）。
             if (RootKeeper.isKeepAliveOn(this@MainActivity)) {
-                // 关键：**不能在这一刻立刻恢复**。Activity 刚显示时启动闪屏正在销毁，
-                // 窗口事务与无障碍 bind 会撞车（logcat 实证：
-                // `AccessibilityManagerService: wait for adding window timeout: <pid>`），
-                // 导致服务卡在 `Binding services` 永不完成。
-                // 因此推迟到窗口事务结束后（延迟 6 秒）再执行，并打印当时的进程龄供核对。
+                // 推迟到窗口事务结束后（延迟 6 秒）：Activity 刚显示时启动闪屏正在销毁，
+                // 若此刻去写设置会触发一次与窗口事务撞车的 bind，撞上就永久卡 `Binding services`。
+                // 方案 C 下这里**不写任何设置**，延迟只是为了让日志里的状态判定落在稳定时刻。
                 lifecycleScope.launch {
                     kotlinx.coroutines.delay(6_000)
-                    // 切到 IO：方法内部有阻塞式 sleep/轮询与 su 调用，不能占主线程
-                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    val bound = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                         RemoteLog.i(
                             "LightCopy",
-                            "main: deferred recovery begin sinceProcStartMs=" +
+                            "main: deferred binding check sinceProcStartMs=" +
                                 (android.os.SystemClock.elapsedRealtime() - CopyAccessibilityService.processStartAt),
                         )
-                        RootKeeper.recoverBindingWhenIdle(applicationContext)
+                        RootKeeper.recoverOrGuide(applicationContext)
+                    }
+                    if (!bound) {
+                        Toast.makeText(
+                            applicationContext,
+                            R.string.toast_need_manual_toggle,
+                            Toast.LENGTH_LONG,
+                        ).show()
                     }
                 }
             }
@@ -151,11 +155,15 @@ class MainActivity : ComponentActivity() {
                             if (granted) {
                                 keepAliveOn = true
                                 RootKeeper.setKeepAliveOn(appContext, true)
-                                // 切到 IO 线程：recoverBindingWhenIdle 内部有阻塞式 sleep/轮询与 su 调用
-                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                    RootKeeper.recoverBindingWhenIdle(appContext)
+                                // 方案 C：开启保活后只做一次绑定状态检测（不写设置、不重绑）。
+                                // 重绑被证明是卡死的成因，故不再随开关自动执行；
+                                // 需要时可在「主动重绑」开关里单独开启（默认关）。
+                                val bound = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                    RootKeeper.recoverOrGuide(appContext)
                                 }
-                                Toast.makeText(appContext, R.string.toast_keepalive_on, Toast.LENGTH_SHORT).show()
+                                val msgRes = if (bound) R.string.toast_keepalive_on
+                                else R.string.toast_keepalive_on_need_toggle
+                                Toast.makeText(appContext, msgRes, Toast.LENGTH_LONG).show()
                             } else {
                                 Toast.makeText(appContext, R.string.toast_keepalive_no_root, Toast.LENGTH_LONG).show()
                             }
@@ -227,6 +235,19 @@ class MainActivity : ComponentActivity() {
                 Updater.setPreferMirror(appContext, want)
             }
 
+            // 主动重绑开关：默认关。关闭时 App 只检测状态、引导用户手动关/开一次服务，
+            // 绝不自动写无障碍设置。开启后恢复旧的自动重绑（实验性，可能加剧卡死）。
+            var activeRebindOn by remember { mutableStateOf(RootKeeper.isActiveRebindOn(this@MainActivity)) }
+            val onActiveRebindToggle: (Boolean) -> Unit = { want ->
+                activeRebindOn = want
+                RootKeeper.setActiveRebindOn(appContext, want)
+                Toast.makeText(
+                    appContext,
+                    if (want) R.string.rebind_desc_on else R.string.rebind_desc_off,
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+
             MaterialTheme(colorScheme = lightColorScheme(primary = Color(0xFF00796B))) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     val updateState by updateVm.state.collectAsState()
@@ -238,6 +259,7 @@ class MainActivity : ComponentActivity() {
                         keepAliveBusy = keepAliveBusy,
                         remoteLogOn = remoteLogOn,
                         mirrorOn = mirrorOn,
+                        activeRebindOn = activeRebindOn,
                         onOpenAccessibilitySettings = {
                             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                         },
@@ -249,6 +271,7 @@ class MainActivity : ComponentActivity() {
                         onUploadNow = onUploadNow,
                         onCopyLogs = onCopyLogs,
                         onMirrorToggle = onMirrorToggle,
+                        onActiveRebindToggle = onActiveRebindToggle,
                     )
                     UpdateDialog(updateVm)
                     if (showLogDialog) {
@@ -430,6 +453,7 @@ private fun LightCopyScreen(
     keepAliveBusy: Boolean,
     remoteLogOn: Boolean,
     mirrorOn: Boolean,
+    activeRebindOn: Boolean,
     onOpenAccessibilitySettings: () -> Unit,
     onAddTile: () -> Unit,
     onCheckUpdate: () -> Unit,
@@ -439,6 +463,7 @@ private fun LightCopyScreen(
     onUploadNow: () -> Unit,
     onCopyLogs: () -> Unit,
     onMirrorToggle: (Boolean) -> Unit,
+    onActiveRebindToggle: (Boolean) -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -616,6 +641,34 @@ private fun LightCopyScreen(
                 Switch(
                     checked = mirrorOn,
                     onCheckedChange = onMirrorToggle,
+                )
+            }
+        }
+
+        // 主动重绑开关（默认关，实验性）：关闭时只检测 + 引导手动关/开，不写无障碍设置
+        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFF1F3F4))) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.rebind_title),
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = stringResource(
+                            if (activeRebindOn) R.string.rebind_desc_on else R.string.rebind_desc_off
+                        ),
+                        fontSize = 13.sp,
+                        color = Color(0xFF616161),
+                    )
+                }
+                Switch(
+                    checked = activeRebindOn,
+                    onCheckedChange = onActiveRebindToggle,
                 )
             }
         }
