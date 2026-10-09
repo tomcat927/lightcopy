@@ -67,7 +67,7 @@ object RemoteLog {
 
     fun sessionStart(context: Context) {
         init(context)
-        i(TAG, "---- 会话开始 v${versionName(context)} (versionCode ${versionCode(context)}) ----")
+        i(TAG, "---- 会话开始 v${versionName(context)} · versionCode=${versionCode(context)} · 构建时间=${buildTimeOf(versionCode(context))} ----")
     }
 
     fun d(tag: String, msg: String) = log("D", tag, msg)
@@ -158,6 +158,17 @@ object RemoteLog {
         context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode
     } catch (_: Exception) {
         0L
+    }
+
+    /**
+     * versionCode 是 CI 用 `date +%s` 生成的构建时间戳，换算成可读时间即可直接对应 Release tag。
+     * 排查日志时必须能一眼确认"设备跑的到底是哪次构建"，否则容易把旧包的日志当新包分析。
+     */
+    fun buildTimeOf(code: Long): String = try {
+        java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US)
+            .format(Date(code * 1000L))
+    } catch (_: Exception) {
+        "?"
     }
 
     // ---------- 上传 ----------
@@ -278,9 +289,17 @@ object RemoteLog {
     }
 
     private fun buildSnapshot(ctx: Context, uploading: File, reason: String): ByteArray {
+        val code = versionCode(ctx)
+        // versionCode 是 CI 用 `date +%s` 生成的构建时间戳，换算成可读时间就能跟 Release tag 对上，
+        // 排查时不必再手工换算（此前多次需要反推设备到底装的哪次构建）。
+        val buildTime = buildTimeOf(code)
         val header = buildString {
             appendLine("轻复制诊断日志")
-            appendLine("Generated: ${format.format(Date())} · v${versionName(ctx)} (versionCode ${versionCode(ctx)}) · 触发: $reason")
+            appendLine("Generated: ${format.format(Date())} · 触发: $reason")
+            appendLine(
+                "App: v${versionName(ctx)} · versionCode=$code · 构建时间=$buildTime · " +
+                    "sdk=${android.os.Build.VERSION.SDK_INT} · 机型=${android.os.Build.MODEL}"
+            )
             appendLine("Privacy: 脱敏快照；凭据与复制内容不在日志中")
             appendLine()
         }

@@ -205,17 +205,29 @@ object RootKeeper {
                 // 一条 su 命令内完成 关总开关→摘除→挂回→开总开关，避免多次弹 su。
                 // 注意：这里不能用 `&&` 串联——settings put 偶发返回非 0 会中断整条链，
                 // 导致"摘掉没挂回"或"总开关停在 0"，服务被永久关闭。改用 `;` 保证每一步都执行。
-                val script = "settings put secure accessibility_enabled 0; sleep 0.5; " +
-                    "settings put secure enabled_accessibility_services '$without'; sleep 0.7; " +
-                    "settings put secure enabled_accessibility_services '$current'; " +
-                    "settings put secure accessibility_enabled 1"
-                val suSucceeded = runSu(script, timeoutMs = 20_000)
+                //
+                // 关键诊断：每一步后都 `settings get` 回显真实值。
+                // 只在 App 侧读设置是不够的——如果 su 里的写入被 SELinux/ROM 静默拒绝，
+                // App 侧读到的是"没变"，无法区分"没写成"和"写成了但系统没反应"。
+                val script = buildString {
+                    append("echo step=off; settings put secure accessibility_enabled 0; sleep 0.5; ")
+                    append("echo afterOff=\$(settings get secure accessibility_enabled); ")
+                    append("echo step=remove; settings put secure enabled_accessibility_services '$without'; sleep 0.7; ")
+                    append("echo afterRemove=\$(settings get secure enabled_accessibility_services); ")
+                    append("echo step=restore; settings put secure enabled_accessibility_services '$current'; ")
+                    append("echo afterRestore=\$(settings get secure enabled_accessibility_services); ")
+                    append("echo step=on; settings put secure accessibility_enabled 1; ")
+                    append("echo afterOn=\$(settings get secure accessibility_enabled)")
+                }
+                val (suSucceeded, suOut) = runSuCapture(script, timeoutMs = 20_000)
                 Thread.sleep(REBIND_SETTLE_MS)
                 val enabledAfter = CopyAccessibilityService.isSelfEnabled(context)
+                val masterNow = Settings.Secure.getInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, -1)
                 RemoteLog.i(
                     TAG,
                     "force rebind via su succeeded=$suSucceeded enabledAfter=$enabledAfter " +
-                        "emptiedList=${withoutRaw.isBlank()} elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+                        "masterNow=$masterNow emptiedList=${withoutRaw.isBlank()} " +
+                        "elapsed=${SystemClock.elapsedRealtime() - startedAt}ms detail=[$suOut]",
                 )
                 suSucceeded && enabledAfter
             }
@@ -261,13 +273,20 @@ object RootKeeper {
 
     // ---------- root shell ----------
 
-    private fun runSu(command: String, timeoutMs: Long = 5_000): Boolean {
+    /**
+     * 执行 su 命令。
+     * 返回 (是否成功, 标准输出+标准错误)。输出会带进日志——
+     * 排查"su 报成功但设置没变"这类问题时，唯一可靠的证据是命令自身的回显。
+     */
+    private fun runSuCapture(command: String, timeoutMs: Long = 5_000): Pair<Boolean, String> {
         val startedAt = SystemClock.elapsedRealtime()
         return try {
             val process = ProcessBuilder("su", "-c", command).start()
             // 排空输出防止管道写满阻塞
-            val outThread = Thread { process.inputStream.use { it.readBytes() } }
-            val errThread = Thread { process.errorStream.use { it.readBytes() } }
+            var out = ""
+            var err = ""
+            val outThread = Thread { out = runCatching { process.inputStream.use { it.readBytes().decodeToString() } }.getOrDefault("") }
+            val errThread = Thread { err = runCatching { process.errorStream.use { it.readBytes().decodeToString() } }.getOrDefault("") }
             outThread.isDaemon = true
             errThread.isDaemon = true
             outThread.start()
@@ -275,20 +294,24 @@ object RootKeeper {
             val finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
             val exitCode = if (finished) process.exitValue() else null
             if (!finished) process.destroyForcibly()
-            outThread.join(500)
-            errThread.join(500)
+            outThread.join(800)
+            errThread.join(800)
             val succeeded = finished && exitCode == 0
+            val combined = (out.trim() + " " + err.trim()).trim().replace("\n", " | ")
             RemoteLog.i(
                 TAG,
                 "su command finished succeeded=$succeeded timedOut=${!finished} " +
-                    "exitCode=${exitCode ?: -1} elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+                    "exitCode=${exitCode ?: -1} out=[$combined] elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
             )
-            succeeded
+            Pair(succeeded, combined)
         } catch (e: Exception) {
             RemoteLog.w(TAG, "su command failed elapsed=${SystemClock.elapsedRealtime() - startedAt}ms", e)
-            false
+            Pair(false, "exception:${e.message}")
         }
     }
+
+    private fun runSu(command: String, timeoutMs: Long = 5_000): Boolean =
+        runSuCapture(command, timeoutMs).first
 }
 
 /**
