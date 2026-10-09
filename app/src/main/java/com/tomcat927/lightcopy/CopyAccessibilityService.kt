@@ -25,6 +25,19 @@ class CopyAccessibilityService : AccessibilityService() {
     companion object {
         private const val TAG = "LightCopy"
 
+        /**
+         * 派发"收起通知栏"后、开始采集屏幕文字前的等待。
+         * 面板收起动画 + 窗口层级更新需要一点时间，太早采集仍会拿到 SystemUI 的窗口。
+         */
+        private const val SHADE_COLLAPSE_WAIT_MS = 350L
+
+        /**
+         * 采集重试：面板刚收起的过渡态里 getWindows() 可能仍只暴露 SystemUI。
+         * 若首采结果为 0 块就按此间隔再试，最多 [COLLECT_MAX_ATTEMPTS] 次。
+         */
+        private const val COLLECT_RETRY_WAIT_MS = 250L
+        private const val COLLECT_MAX_ATTEMPTS = 4
+
         @Volatile
         var instance: CopyAccessibilityService? = null
             private set
@@ -94,10 +107,24 @@ class CopyAccessibilityService : AccessibilityService() {
 
     private fun enterCopyMode() {
         if (overlay != null) return
+        // 第一步：先收起通知栏 / QS 面板。
+        // 点瓦片时面板是展开的，此时 getWindows() 顶层窗口是 SystemUI，
+        // 直接采集只会拿到通知栏自己的短文本（实测 roots=[com.android.systemui]，23 个块），
+        // 底下的真实页面文字采不到 → 选择模式形同虚设。
+        // 收起动作是异步的，因此把"采集"推到等待之后再执行，避免阻塞主线程。
+        collapseShade()
+        mainHandler.postDelayed({ collectAndShowOverlay() }, SHADE_COLLAPSE_WAIT_MS)
+    }
+
+    /** 采集屏幕文字并挂上选择悬浮层（须在通知栏已收起后调用） */
+    private fun collectAndShowOverlay(attempt: Int = 1) {
+        if (overlay != null) return
         val startedAt = SystemClock.elapsedRealtime()
-        RemoteLog.i(TAG, "copy mode enter: collecting screen text")
+        RemoteLog.i(TAG, "copy mode enter: collecting screen text (attempt=$attempt)")
         val blocks = try {
-            TextBlockCollector.collect(this)
+            // 必须排除 SystemUI：通知栏/QS 面板很可能还在收拢中，
+            // 不排除就会把整屏文字采成通知栏自己的一堆短文本（实测 roots=[com.android.systemui]）。
+            TextBlockCollector.collect(this, excludeSystemUi = true)
         } catch (e: Exception) {
             RemoteLog.e(TAG, "copy mode enter: text collection failed", e)
             Toast.makeText(this, R.string.toast_no_text, Toast.LENGTH_SHORT).show()
@@ -108,6 +135,15 @@ class CopyAccessibilityService : AccessibilityService() {
             "copy mode enter: collected ${blocks.size} blocks in ${SystemClock.elapsedRealtime() - startedAt}ms",
         )
         if (blocks.isEmpty()) {
+            // 面板收拢动画尚未结束时，底层 App 的窗口可能这一刻还读不到 → 稍后重试，
+            // 而不是立刻报"没找到文字"让用户以为功能坏了。
+            if (attempt < COLLECT_MAX_ATTEMPTS) {
+                mainHandler.postDelayed(
+                    { collectAndShowOverlay(attempt + 1) },
+                    COLLECT_RETRY_WAIT_MS,
+                )
+                return
+            }
             Toast.makeText(this, R.string.toast_no_text, Toast.LENGTH_SHORT).show()
             return
         }
@@ -145,6 +181,29 @@ class CopyAccessibilityService : AccessibilityService() {
                 Toast.makeText(this, R.string.toast_overlay_failed, Toast.LENGTH_SHORT).show()
             }
         }
+    }
+
+    /**
+     * 收起通知栏 / QS 面板。返回系统是否接受了这次收起请求。
+     *
+     * 为什么必须做：点瓦片时通知栏是展开的，此时 `getWindows()` 的顶层窗口是 SystemUI，
+     * 采集到的"屏幕文字"其实是通知栏自己的一堆短文本（实测 roots=[com.android.systemui]），
+     * 底下的真实页面文字根本采不到 → 选择模式形同虚设。
+     *
+     * 为什么用 `performGlobalAction(GLOBAL_ACTION_BACK)`：
+     * - 由系统执行，**不创建任何窗口**（瓦片里若造窗口会令无障碍绑定卡死，已踩过坑）；
+     * - 无障碍服务已绑定时即可用，权限足够；
+     * - 比 `ACTION_CLOSE_SYSTEM_DIALOGS` 广播可靠（该广播自 Android 12 起受限）。
+     *
+     * 注意返回值只表示"收起动作已派发成功"，不代表面板已完全收起 —— 收拢是异步动画。
+     * 因此调用方仍需等 [SHADE_COLLAPSE_WAIT_MS]，并由采集侧的 SystemUI 排除 + 重试兜底。
+     */
+    private fun collapseShade(): Boolean {
+        val ok = runCatching { performGlobalAction(GLOBAL_ACTION_BACK) }
+            .onFailure { RemoteLog.w(TAG, "collapse shade: global back failed", it) }
+            .getOrDefault(false)
+        RemoteLog.d(TAG, "collapse shade: global back dispatched=$ok")
+        return ok
     }
 
     private fun exitCopyMode() {

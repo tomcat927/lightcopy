@@ -24,7 +24,7 @@ class CopyModeTileService : TileService() {
 
         /**
          * 系统写回设置后 bind 服务通常在几百毫秒内（实测 150~170ms），3 秒足够。
-         * 去掉造窗口的 collapseQsPanel 后不再有额外延迟，等待期间给用户 toast 提示。
+         * 面板收起改由无障碍服务用 performGlobalAction 完成，不在此处造窗口，无额外延迟。
          */
         private const val BIND_WAIT_MS = 3_000L
         /**
@@ -51,7 +51,11 @@ class CopyModeTileService : TileService() {
         // 实证：那个 Dialog 会让系统的无障碍窗口添加流程卡超时
         // （logcat: AccessibilityManagerService: wait for adding window timeout: <pid>），
         // 导致无障碍服务永远停在 Binding services、bind 永不完成 —— 这是瓦片点了没反应的根因。
-        // onClick 之后系统本身会收起 QS 面板，无需我们插手。
+        //
+        // 收起面板这件事改由 CopyAccessibilityService 在进入复制模式时用
+        // performGlobalAction(GLOBAL_ACTION_BACK) 完成（系统执行、不造窗口，安全）。
+        // 这里不能指望"onClick 返回后系统自动收起" —— 实测不会，面板会留在原位，
+        // 导致采集到的全是通知栏文字（roots=[com.android.systemui]）。
 
         if (service != null) {
             RemoteLog.d(TAG, "tile: toggle requested on bound service")
@@ -214,14 +218,18 @@ class CopyModeTileService : TileService() {
     }
 
     /**
-     * 折叠 QS 面板**不再由本类负责**。
+     * 折叠 QS 面板**不由本类负责**。
      *
      * 曾实现为「发 ACTION_CLOSE_SYSTEM_DIALOGS / 或 API 31+ 用 showDialog(空 Dialog)」，
      * 但那两条路都有害：
      *  - showDialog(空 Dialog) 会在系统绑定无障碍服务时制造窗口，令
-     *    `AccessibilityManagerService` 的「添加窗口」步骤超时，服务永远停在你
+     *    `AccessibilityManagerService` 的「添加窗口」步骤超时，服务永远停在
      *    `Binding services`、bind 永不完成（logcat 实证）。
      *  - ACTION_CLOSE_SYSTEM_DIALOGS 自 API 31 起已受限，且同样是易碎 hack。
-     * `TileService.onClick()` 返回后系统自身会收起 QS 面板，不需要我们干预。
+     *
+     * 现在改由 [CopyAccessibilityService] 在进入复制模式时用
+     * `performGlobalAction(GLOBAL_ACTION_BACK)` 折叠 —— 系统执行、不创建窗口，
+     * 既不会卡住绑定，也确实能让底层页面文字暴露给采集器。
+     * （实测 `TileService.onClick()` 返回后系统**不会**自动收起面板。）
      */
 }

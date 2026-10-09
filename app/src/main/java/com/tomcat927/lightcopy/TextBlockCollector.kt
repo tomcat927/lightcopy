@@ -14,9 +14,14 @@ data class TextBlock(val text: String, val bounds: Rect)
  * 从无障碍节点树采集文本块。
  *
  * 双路策略：
- * 1. rootInActiveWindow 非本包 → 只遍历它（常规情况，快）；
- * 2. 否则（root 为 null 或属于本包，比如悬浮层正持有焦点时再触发）遍历 service.windows
- *    全部窗口，排除本包、SystemUI、输入法键盘窗、无障碍覆盖层（防采到自己）。
+ * 1. rootInActiveWindow 非本包**且非 SystemUI** → 只遍历它（常规情况，快）；
+ * 2. 否则遍历 service.windows 全部窗口，排除本包、SystemUI、输入法键盘窗、
+ *    无障碍覆盖层（防采到自己）。
+ *
+ * 为什么 SystemUI 也要走第 2 路：点瓦片时通知栏/QS 面板是展开的，此时系统焦点窗口
+ * 就是 `com.android.systemui`，第 1 路会把整屏"页面文字"错采成通知栏自己的几十条短文本
+ * （实测 roots=[com.android.systemui]）。更糟的是，即使展开下，通知栏之外的下层窗口在
+ * windows 里依旧可读 —— 走第 2 路才能在面板尚未收完的中间态里拿到底层 App 的窗口。
  */
 object TextBlockCollector {
 
@@ -27,7 +32,13 @@ object TextBlockCollector {
     private const val MAX_NODES = 5000
     private const val MAX_BLOCKS = 1000
 
-    fun collect(service: AccessibilityService): List<TextBlock> {
+    /**
+     * 采集屏幕文字。
+     *
+     * @param excludeSystemUi true 时不把 SystemUI 的窗口当作采集源。点瓦片进入复制模式时
+     *   通知栏/QS 面板大概率还在收拢动画中，必须排除掉它，否则采到的全是通知栏文字。
+     */
+    fun collect(service: AccessibilityService, excludeSystemUi: Boolean = false): List<TextBlock> {
         val startMs = System.currentTimeMillis()
         val ownPackage = service.packageName
         val blocks = LinkedHashMap<String, TextBlock>()
@@ -41,8 +52,15 @@ object TextBlockCollector {
             val activeRoot = service.rootInActiveWindow
             if (activeRoot != null) allocatedNodes.add(activeRoot)
 
-            if (activeRoot != null && activeRoot.packageName?.toString() != ownPackage) {
-                roots.add(activeRoot)
+            // 第一路：焦点窗口是别的 App（既不是我们，也不是 SystemUI）→ 只采它，最快。
+            // 需要排除 SystemUI：通知栏展开 / 正在收拢时焦点窗口就是它，采它等于白采。
+            val usableActiveRoot = activeRoot?.takeIf { root ->
+                root.packageName?.toString() != ownPackage &&
+                    !(excludeSystemUi && root.packageName?.toString() == SYSTEM_UI_PKG)
+            }
+
+            if (usableActiveRoot != null) {
+                roots.add(usableActiveRoot)
             } else {
                 val windows = service.windows ?: emptyList()
                 allocatedWindows.addAll(windows)
@@ -52,7 +70,8 @@ object TextBlockCollector {
                     val root = window.root ?: continue
                     allocatedNodes.add(root)
                     val pkg = root.packageName?.toString()
-                    if (pkg == ownPackage || pkg == SYSTEM_UI_PKG) continue
+                    if (pkg == ownPackage) continue
+                    if (pkg == SYSTEM_UI_PKG && excludeSystemUi) continue
                     roots.add(root)
                 }
             }
