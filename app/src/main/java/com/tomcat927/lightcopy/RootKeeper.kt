@@ -134,8 +134,10 @@ object RootKeeper {
                 )
                 enabledAfter
             } else {
-                val script = "settings put secure enabled_accessibility_services '$merged'" +
-                    " && settings put secure accessibility_enabled 1"
+                // 注意用 `;` 而非 `&&`：settings put 偶发返回非 0 会让整条链中断，
+                // 导致列表写了、master 却没写（服务依旧不会绑），所以两步都要独立执行。
+                val script = "settings put secure enabled_accessibility_services '$merged'; " +
+                    "settings put secure accessibility_enabled 1"
                 val suSucceeded = runSu(script, timeoutMs = suTimeoutMs)
                 val enabledAfter = CopyAccessibilityService.isSelfEnabled(context)
                 RemoteLog.i(
@@ -154,21 +156,26 @@ object RootKeeper {
     /** 摘除后到挂回之间的等待：太短系统来不及处理解绑，太长用户会看到服务闪断 */
     private const val REBIND_GAP_MS = 700L
 
-    /**
-     * 关掉总开关后到改服务列表之间的等待。
-     * AccessibilityManagerService 处理"总开关关闭"是异步的，需要给它时间真正解绑全部服务，
-     * 否则随后的 1→0→1 翻转会被合并成一次无变化写入，重绑仍然不生效。
-     */
-    private const val REBIND_MASTER_OFF_MS = 800L
-
     /** 挂回后等待系统重新 bind 的时间（设置写入是异步的，要留出窗口） */
     private const val REBIND_SETTLE_MS = 1_200L
 
     /**
      * 强制重绑：设置里服务已启用但实际没被绑定（热更新/进程死亡后的僵死状态，
      * 设置值不变系统不会触发重绑）→ 把本服务从启用列表摘掉再挂回，
-     * 两次设置变更必然触发 AccessibilityManagerService 先解绑再绑定。
+     * 两次列表变更触发 AccessibilityManagerService 重新 bind。
      * 只动本服务，其他无障碍服务不受影响。
+     *
+     * === 关键修正（10-09 16:2x 实证）===
+     * 早先的实现在这里额外做了「总开关 accessibility_enabled 1→0→1 翻转」，
+     * 那是**错误且有害**的：
+     *   - 实测两次"天然绑定成功"（10-07 22:09:02、10-09 13:55:38）都只做了
+     *     "写列表 + master=1"，系统 150ms 内就 bind 上了，**从未翻转总开关**。
+     *   - 而每次翻转总开关后，`dumpsys accessibility` 显示 Bound services 只剩
+     *     先绑上的那一个（AutoJs6），本服务和用户其它 3 个无障碍服务全部卡在
+     *     `Binding services` 且 `onServiceConnected` 永不触发。
+     *   - 即：翻转总开关会让本 ROM 在"全量解绑 → 重新绑定"过程中把大部分服务丢掉，
+     *     既救不活自己，还会打断用户其它正在并行的无障碍服务。
+     * 因此这里改为**只改列表、不碰总开关**，让系统按列表变更自然重新 bind。
      *
      * 关键：**摘除后列表可能为空**（本机只开本服务时）。
      * 空字符串写入 `enabled_accessibility_services` 在多数 ROM 上会被当作无效变更忽略，
@@ -210,46 +217,43 @@ object RootKeeper {
                     context, Manifest.permission.WRITE_SECURE_SETTINGS
                 ) == PackageManager.PERMISSION_GRANTED
             ) {
-                // 第一步：把总开关真正关掉。这是重绑能生效的关键——
-                // 只改 enabled_accessibility_services 列表时，若总开关始终是 1，
-                // AccessibilityManagerService 看到的是"1→1"无变化，不会重新 bind。
-                // 必须让它经历 1→0→1 才会触发全量解绑 + 重新绑定。
-                val masterOff = Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 0)
-                Thread.sleep(REBIND_MASTER_OFF_MS)
+                // 只改列表，两步：摘除 → 挂回。总开关保持不动（原因见方法头注释）。
                 val removed = Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, without)
                 Thread.sleep(REBIND_GAP_MS)
                 val restored = Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, current)
-                val masterOn = Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+                // 兜底：万一本机总开关被 ROM 关掉了，这里只做"补 1"，绝不主动写 0。
+                val master = Settings.Secure.getInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 0)
+                val masterWritten = if (master == 1) true
+                    else Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
                 Thread.sleep(REBIND_SETTLE_MS)
                 val enabledAfter = CopyAccessibilityService.isSelfEnabled(context)
                 RemoteLog.i(
                     TAG,
-                    "force rebind via secure settings masterOff=$masterOff removed=$removed " +
-                        "restored=$restored masterOn=$masterOn enabledAfter=$enabledAfter " +
+                    "force rebind via secure settings removed=$removed restored=$restored " +
+                        "masterBefore=$master masterWritten=$masterWritten enabledAfter=$enabledAfter " +
                         "emptiedList=${withoutRaw.isBlank()} elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
                 )
                 // 写入成功 + 服务确实回到了启用列表，才算这次重绑动作生效。
                 // 真正"是否绑上"由调用方 awaitInstance 判定（设置生效是异步的）。
-                masterOff && removed && restored && masterOn && enabledAfter
+                removed && restored && masterWritten && enabledAfter
             } else {
-                // 一条 su 命令内完成 关总开关→摘除→挂回→开总开关，避免多次弹 su。
+                // 一条 su 命令内完成 摘除→挂回，避免多次弹 su。
+                // **不翻转总开关**（原因见方法头注释）：只写列表，末了确保 master=1。
                 // 注意：这里不能用 `&&` 串联——settings put 偶发返回非 0 会中断整条链，
-                // 导致"摘掉没挂回"或"总开关停在 0"，服务被永久关闭。改用 `;` 保证每一步都执行。
+                // 导致"摘掉没挂回"，服务被永久关闭。改用 `;` 保证每一步都执行。
                 //
                 // 关键诊断：每一步后都 `settings get` 回显真实值。
                 // 只在 App 侧读设置是不够的——如果 su 里的写入被 SELinux/ROM 静默拒绝，
                 // App 侧读到的是"没变"，无法区分"没写成"和"写成了但系统没反应"。
                 val script = buildString {
-                    append("echo step=off; settings put secure accessibility_enabled 0; sleep 0.5; ")
-                    append("echo afterOff=\$(settings get secure accessibility_enabled); ")
                     append("echo step=remove; settings put secure enabled_accessibility_services '$without'; sleep 0.7; ")
                     append("echo afterRemove=\$(settings get secure enabled_accessibility_services); ")
                     append("echo step=restore; settings put secure enabled_accessibility_services '$current'; ")
                     append("echo afterRestore=\$(settings get secure enabled_accessibility_services); ")
-                    append("echo step=on; settings put secure accessibility_enabled 1; ")
+                    append("echo step=master; settings put secure accessibility_enabled 1; ")
                     append("echo afterOn=\$(settings get secure accessibility_enabled); ")
                     // 稳定期后再读一次：若与 afterRestore 不同，说明有第三方工具
-                    // （自动化脚本/助手类 App）正在同时改写这份列表，与我们的重绑互相打架。
+                    // （自动化脚本/助手类 App）正在同时改写这份列表，与我们互相打架。
                     append("sleep 2; echo settleList=\$(settings get secure enabled_accessibility_services); ")
                     append("echo settleMaster=\$(settings get secure accessibility_enabled)")
                 }
@@ -356,9 +360,19 @@ object RootKeeper {
      * 也是判断"服务是否被系统接受"的唯一权威依据。
      */
     fun dumpAccessibilityState(): String {
-        val script = "dumpsys accessibility 2>/dev/null | grep -iE " +
-            "'Bound services|Enabled services|binding|Crashed|dead|not responded' | head -40"
-        val (ok, out) = runSuCapture(script, timeoutMs = 10_000)
+        // 只 grep 标题行会漏掉条目内容：dumpsys 里 Bound/Binding/Enabled services 的列表是
+        // 换行展开的（每项一行 "Service[...]"），grep 标题只能抓到紧随其后的第一条。
+        // 这里按"标题行 + 其后续条目行"一起截取，段间用 --- 分隔；同时抓 logcat 中
+        // 与本包相关的绑定失败线索，定位"卡在 Binding 却始终不 Bound"的原因。
+        val script = buildString {
+            append("dumpsys accessibility 2>/dev/null | grep -A 12 -E ")
+            append("'^ *Bound services:|^ *Binding services:|^ *Crashed services:|^ *Enabled services:' ")
+            append("| head -80; ")
+            append("echo ===LOGCAT===; ")
+            append("logcat -d -t 500 2>/dev/null | grep -iE ")
+            append("'lightcopy|AccessibilityManagerService|accessibilityservice' | tail -50")
+        }
+        val (ok, out) = runSuCapture(script, timeoutMs = 15_000)
         return if (ok) out else "dumpsys failed: $out"
     }
 }

@@ -25,16 +25,19 @@ class CopyModeTileService : TileService() {
     companion object {
         private const val TAG = "LightCopy"
 
-        /** 系统写回设置后 bind 服务通常在几百毫秒内，这里等最多 3 秒 */
-        private const val BIND_WAIT_MS = 3_000L
         /**
-         * 强制重绑后的等待。重绑内部要走「关总开关 800ms → 摘除 700ms → settle 1200ms」
-         * 再加上系统异步 bind 的时间，5 秒偏紧，放宽到 8 秒。
+         * 系统写回设置后 bind 服务通常在几百毫秒内（实测 150~170ms），
+         * 这里等 5 秒：给足系统自然绑定的时间，避免过早触发重绑把它打断。
          */
-        private const val BIND_WAIT_LONG_MS = 8_000L
+        private const val BIND_WAIT_MS = 5_000L
+        /**
+         * 重绑后的等待。重绑现在是「摘除 700ms → 挂回 → settle 1200ms」，
+         * 不再翻转总开关（实证翻转会让系统重绑时丢服务），所以不必给太久。
+         */
+        private const val BIND_WAIT_LONG_MS = 6_000L
         private const val BIND_POLL_MS = 100L
-        /** 重绑最多尝试轮数：系统 bind 异步且可能被 ROM 节流，一次不成很常见 */
-        private const val REBIND_MAX_ATTEMPTS = 2
+        /** 重绑轮数：温和重绑一次足矣，多轮反而在系统里制造噪音 */
+        private const val REBIND_MAX_ATTEMPTS = 1
         private val startupInProgress = AtomicBoolean(false)
     }
 
@@ -94,8 +97,18 @@ class CopyModeTileService : TileService() {
                 )
                 if (bound == null) {
                     // 设置里已启用但服务没被系统绑定（热更新/进程死亡后的僵死状态，
-                    // 设置值不变就不会触发重绑）→ 把本服务摘掉再挂回，强制系统重新 bind。
-                    // 系统 bind 是异步的且可能被 ROM 节流，一次不成很常见，这里给两轮机会。
+                    // 设置值不变就不会触发重绑）→ 把本服务摘掉再挂回，让系统按列表变更重新 bind。
+                    //
+                    // 注意：重绑**不再翻转总开关**（见 RootKeeper.forceRebind 注释）。
+                    // 实证翻转总开关会让本 ROM 在批量重绑中丢掉大部分服务，
+                    // 既救不活自己、也会打断用户其它正在并行的无障碍服务。
+                    //
+                    // 重绑前后各抓一次 dumpsys：万一重绑仍不成功，也能看到
+                    // 它有没有把别人（全局复制/AutoJS/华硕/广告锤子）从 Bound 里打掉。
+                    RemoteLog.i(
+                        TAG,
+                        "tile: pre-rebind state dump [${RootKeeper.dumpAccessibilityState()}]",
+                    )
                     var attempt = 0
                     while (bound == null && attempt < REBIND_MAX_ATTEMPTS) {
                         attempt++
