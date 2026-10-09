@@ -127,7 +127,7 @@ class CopyModeTileService : TileService() {
                         TAG,
                         "tile: pre-recovery state dump [${RootKeeper.dumpAccessibilityState()}]",
                     )
-                    // 统一走"空闲时机恢复"：写对设置 → 轻量重绑 → 仍不行则进程级重启。
+                    // 统一走"空闲时机恢复"：写对设置 → 确认实例 → 轻量重绑 → 轮询确认。
                     RootKeeper.recoverBindingWhenIdle(appContext)
                     bound = awaitInstance(BIND_WAIT_LONG_MS)
                     RemoteLog.i(
