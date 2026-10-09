@@ -1,10 +1,7 @@
 package com.tomcat927.lightcopy
 
-import android.app.Dialog
 import android.app.PendingIntent
 import android.content.Intent
-import android.graphics.Color
-import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Handler
@@ -26,10 +23,10 @@ class CopyModeTileService : TileService() {
         private const val TAG = "LightCopy"
 
         /**
-         * 系统写回设置后 bind 服务通常在几百毫秒内（实测 150~170ms），
-         * 这里等 5 秒：给足系统自然绑定的时间，避免过早触发重绑把它打断。
+         * 系统写回设置后 bind 服务通常在几百毫秒内（实测 150~170ms），3 秒足够。
+         * 去掉造窗口的 collapseQsPanel 后不再有额外延迟，等待期间给用户 toast 提示。
          */
-        private const val BIND_WAIT_MS = 5_000L
+        private const val BIND_WAIT_MS = 3_000L
         /**
          * 重绑后的等待。重绑现在是「摘除 700ms → 挂回 → settle 1200ms」，
          * 不再翻转总开关（实证翻转会让系统重绑时丢服务），所以不必给太久。
@@ -50,7 +47,11 @@ class CopyModeTileService : TileService() {
             TAG,
             "tile: click bound=${service != null} enabled=${CopyAccessibilityService.isSelfEnabled(this)} sdk=${Build.VERSION.SDK_INT}",
         )
-        collapseQsPanel()
+        // 不在这里做任何"造窗口"的操作（曾经用 showDialog(空 Dialog) 折 QS 面板）。
+        // 实证：那个 Dialog 会让系统的无障碍窗口添加流程卡超时
+        // （logcat: AccessibilityManagerService: wait for adding window timeout: <pid>），
+        // 导致无障碍服务永远停在 Binding services、bind 永不完成 —— 这是瓦片点了没反应的根因。
+        // onClick 之后系统本身会收起 QS 面板，无需我们插手。
 
         if (service != null) {
             RemoteLog.d(TAG, "tile: toggle requested on bound service")
@@ -213,26 +214,14 @@ class CopyModeTileService : TileService() {
     }
 
     /**
-     * 先折叠 QS 面板再进选择模式：
-     * - API 31+：showDialog(Dialog) 是官方 API，文档行为即「收起 QS 面板并显示对话框」；
-     *   配一个透明空对话框，显示后立即 dismiss，面板收掉了也不留可见痕迹
-     * - S 以下：发 ACTION_CLOSE_SYSTEM_DIALOGS 广播（API 31 起该广播受限，走上面的路）
+     * 折叠 QS 面板**不再由本类负责**。
+     *
+     * 曾实现为「发 ACTION_CLOSE_SYSTEM_DIALOGS / 或 API 31+ 用 showDialog(空 Dialog)」，
+     * 但那两条路都有害：
+     *  - showDialog(空 Dialog) 会在系统绑定无障碍服务时制造窗口，令
+     *    `AccessibilityManagerService` 的「添加窗口」步骤超时，服务永远停在你
+     *    `Binding services`、bind 永不完成（logcat 实证）。
+     *  - ACTION_CLOSE_SYSTEM_DIALOGS 自 API 31 起已受限，且同样是易碎 hack。
+     * `TileService.onClick()` 返回后系统自身会收起 QS 面板，不需要我们干预。
      */
-    private fun collapseQsPanel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            runCatching {
-                val dialog = Dialog(this).apply {
-                    window?.apply {
-                        setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-                        setDimAmount(0f)
-                    }
-                }
-                showDialog(dialog)
-                // dialog.show 内部是 post 到主线程的，紧随其后 post dismiss 保证 show 先执行
-                Handler(Looper.getMainLooper()).post { dialog.dismiss() }
-            }.onFailure { RemoteLog.w(TAG, "collapse via showDialog failed", it) }
-        } else {
-            runCatching { sendBroadcast(Intent(Intent.ACTION_CLOSE_SYSTEM_DIALOGS)) }
-        }
-    }
 }
