@@ -153,8 +153,11 @@ object RootKeeper {
         }
     }
 
-    /** 摘除后到挂回之间的等待：太短系统来不及处理解绑，太长用户会看到服务闪断 */
-    private const val REBIND_GAP_MS = 700L
+    /**
+     * 摘除后到挂回之间的等待。
+     * 太短系统来不及处理解绑，太长用户会看到服务闪断。
+     */
+    private const val REBIND_GAP_MS = 1_500L
 
     /** 挂回后等待系统重新 bind 的时间（设置写入是异步的，要留出窗口） */
     private const val REBIND_SETTLE_MS = 1_200L
@@ -181,6 +184,13 @@ object RootKeeper {
      * 空字符串写入 `enabled_accessibility_services` 在多数 ROM 上会被当作无效变更忽略，
      * 系统看不到"服务消失"这一步 → 只当成一次无意义的重复写入 → 不触发重绑。
      * 因此列表为空时改写成一个必然无效的哨兵组件名，保证这一步是一次真实的状态变更。
+     *
+     * === 手法修正（10-09 16:45 实证）===
+     * 早先"挂回"用的是 `putString(current)` 覆盖式恢复，与 keepalive 的"追加"手法不同。
+     * 实测：keepalive 的"追加一次"成功过（13:55:38，150ms 绑定），
+     * 而 forceRebind 的"摘除→覆盖挂回"从未成功。
+     * 因此这里把"挂回"也改成**追加式**：重新读当前列表 → 若不含本服务则追加。
+     * 这样它与 keepalive 走的是同一种系统可见的状态变更。
      */
     fun forceRebind(context: Context): Boolean {
         val startedAt = SystemClock.elapsedRealtime()
@@ -217,10 +227,23 @@ object RootKeeper {
                     context, Manifest.permission.WRITE_SECURE_SETTINGS
                 ) == PackageManager.PERMISSION_GRANTED
             ) {
-                // 只改列表，两步：摘除 → 挂回。总开关保持不动（原因见方法头注释）。
+                // 只改列表，两步：摘除 → 追加挂回。总开关保持不动（原因见方法头注释）。
                 val removed = Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, without)
                 Thread.sleep(REBIND_GAP_MS)
-                val restored = Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, current)
+                // 追加式挂回：重新读当前列表（此时应不含本服务），再追加。
+                // 与覆盖式 `putString(current)` 的区别是这会产生一次"新增服务"的变更，
+                // 而 keepalive 正是靠这种变更让系统完成绑定的。
+                val nowList = sanitizeList(
+                    Settings.Secure.getString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: without
+                )
+                val restoredTarget = if (nowList.split(':').any { it.equals(short, true) || it.equals(full, true) }) {
+                    nowList
+                } else {
+                    listOf(nowList.ifBlank { "" }, short).filter { it.isNotBlank() }.joinToString(":")
+                }
+                val restored = Settings.Secure.putString(
+                    cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, restoredTarget
+                )
                 // 兜底：万一本机总开关被 ROM 关掉了，这里只做"补 1"，绝不主动写 0。
                 val master = Settings.Secure.getInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 0)
                 val masterWritten = if (master == 1) true
@@ -231,13 +254,14 @@ object RootKeeper {
                     TAG,
                     "force rebind via secure settings removed=$removed restored=$restored " +
                         "masterBefore=$master masterWritten=$masterWritten enabledAfter=$enabledAfter " +
-                        "emptiedList=${withoutRaw.isBlank()} elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+                        "restoredList='$restoredTarget' emptiedList=${withoutRaw.isBlank()} " +
+                        "elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
                 )
                 // 写入成功 + 服务确实回到了启用列表，才算这次重绑动作生效。
                 // 真正"是否绑上"由调用方 awaitInstance 判定（设置生效是异步的）。
                 removed && restored && masterWritten && enabledAfter
             } else {
-                // 一条 su 命令内完成 摘除→挂回，避免多次弹 su。
+                // 一条 su 命令内完成 摘除→追加挂回，避免多次弹 su。
                 // **不翻转总开关**（原因见方法头注释）：只写列表，末了确保 master=1。
                 // 注意：这里不能用 `&&` 串联——settings put 偶发返回非 0 会中断整条链，
                 // 导致"摘掉没挂回"，服务被永久关闭。改用 `;` 保证每一步都执行。
@@ -245,10 +269,16 @@ object RootKeeper {
                 // 关键诊断：每一步后都 `settings get` 回显真实值。
                 // 只在 App 侧读设置是不够的——如果 su 里的写入被 SELinux/ROM 静默拒绝，
                 // App 侧读到的是"没变"，无法区分"没写成"和"写成了但系统没反应"。
+                //
+                // 挂回目标值在 Kotlin 侧算好（追加式，等价 keepalive 的"新增服务"变更），
+                // 不放进 shell 里做条件拼接——避免脆弱的引号/转义嵌套。
+                val restoreTarget = listOf(withoutRaw, short)
+                    .filter { it.isNotBlank() }
+                    .joinToString(":")
                 val script = buildString {
-                    append("echo step=remove; settings put secure enabled_accessibility_services '$without'; sleep 0.7; ")
+                    append("echo step=remove; settings put secure enabled_accessibility_services '$without'; sleep 1.5; ")
                     append("echo afterRemove=\$(settings get secure enabled_accessibility_services); ")
-                    append("echo step=restore; settings put secure enabled_accessibility_services '$current'; ")
+                    append("echo step=restore; settings put secure enabled_accessibility_services '$restoreTarget'; ")
                     append("echo afterRestore=\$(settings get secure enabled_accessibility_services); ")
                     append("echo step=master; settings put secure accessibility_enabled 1; ")
                     append("echo afterOn=\$(settings get secure accessibility_enabled); ")
@@ -362,17 +392,25 @@ object RootKeeper {
     fun dumpAccessibilityState(): String {
         // 只 grep 标题行会漏掉条目内容：dumpsys 里 Bound/Binding/Enabled services 的列表是
         // 换行展开的（每项一行 "Service[...]"），grep 标题只能抓到紧随其后的第一条。
-        // 这里按"标题行 + 其后续条目行"一起截取，段间用 --- 分隔；同时抓 logcat 中
-        // 与本包相关的绑定失败线索，定位"卡在 Binding 却始终不 Bound"的原因。
+        // 这里：① 抓 Bound/Binding/Crashed/Enabled 各段完整条目（-A 12）；
+        //      ② 单独抓我们服务在 dumpsys 里的所有出现（含每个服务的详细信息段）；
+        //      ③ 回读 Settings.Secure 真值（App 侧读到的可能与系统视角不同）；
+        //      ④ 抓 logcat 里与本包/绑定相关的线索。
         val script = buildString {
             append("dumpsys accessibility 2>/dev/null | grep -A 12 -E ")
             append("'^ *Bound services:|^ *Binding services:|^ *Crashed services:|^ *Enabled services:' ")
             append("| head -80; ")
+            append("echo ===OUR===; ")
+            append("dumpsys accessibility 2>/dev/null | grep -i -B2 -A6 'lightcopy' | head -60; ")
+            append("echo ===SETTINGS===; ")
+            append("echo list=")
+            append("\$(settings get secure enabled_accessibility_services); ")
+            append("echo master=\$(settings get secure accessibility_enabled); ")
             append("echo ===LOGCAT===; ")
-            append("logcat -d -t 500 2>/dev/null | grep -iE ")
-            append("'lightcopy|AccessibilityManagerService|accessibilityservice' | tail -50")
+            append("logcat -d -t 600 2>/dev/null | grep -iE ")
+            append("'lightcopy|AccessibilityManagerService|accessibilityservice|ActivityManager.*lightcopy' | tail -60")
         }
-        val (ok, out) = runSuCapture(script, timeoutMs = 15_000)
+        val (ok, out) = runSuCapture(script, timeoutMs = 20_000)
         return if (ok) out else "dumpsys failed: $out"
     }
 }
