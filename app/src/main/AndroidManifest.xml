@@ -26,15 +26,18 @@
             </intent-filter>
         </activity>
 
-        <!-- 无障碍服务：进程常驻，悬浮层宿主。BIND_ACCESSIBILITY_SERVICE 为签名级权限，仅系统可绑定 -->
+        <!-- 无障碍服务：进程常驻，悬浮层宿主。BIND_ACCESSIBILITY_SERVICE 为签名级权限，仅系统可绑定。
+             声明严格对齐 AutoJS6（SuperMonster003/AutoJs6）已验证可绑定的写法：
+             - intent-filter 内只放 <action>，**不要加 <category CATEGORY_DEFAULT>**；
+             - 不加 android:label（系统自行取 application label）。
+             多声明 category 会让部分 ROM/PM 的 intent 解析把该服务排除在无障碍服务枚举之外，
+             表现为"设置里能看到、但系统永远 bind 不上"（卡在 Binding services）。 -->
         <service
             android:name=".CopyAccessibilityService"
             android:exported="true"
-            android:label="@string/app_name"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
-                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
             <meta-data
                 android:name="android.accessibilityservice"
