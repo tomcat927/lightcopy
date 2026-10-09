@@ -134,6 +134,13 @@ object RootKeeper {
     /** 摘除后到挂回之间的等待：太短系统来不及处理解绑，太长用户会看到服务闪断 */
     private const val REBIND_GAP_MS = 700L
 
+    /**
+     * 关掉总开关后到改服务列表之间的等待。
+     * AccessibilityManagerService 处理"总开关关闭"是异步的，需要给它时间真正解绑全部服务，
+     * 否则随后的 1→0→1 翻转会被合并成一次无变化写入，重绑仍然不生效。
+     */
+    private const val REBIND_MASTER_OFF_MS = 800L
+
     /** 挂回后等待系统重新 bind 的时间（设置写入是异步的，要留出窗口） */
     private const val REBIND_SETTLE_MS = 1_200L
 
@@ -173,29 +180,36 @@ object RootKeeper {
                     context, Manifest.permission.WRITE_SECURE_SETTINGS
                 ) == PackageManager.PERMISSION_GRANTED
             ) {
+                // 第一步：把总开关真正关掉。这是重绑能生效的关键——
+                // 只改 enabled_accessibility_services 列表时，若总开关始终是 1，
+                // AccessibilityManagerService 看到的是"1→1"无变化，不会重新 bind。
+                // 必须让它经历 1→0→1 才会触发全量解绑 + 重新绑定。
+                val masterOff = Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 0)
+                Thread.sleep(REBIND_MASTER_OFF_MS)
                 val removed = Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, without)
                 Thread.sleep(REBIND_GAP_MS)
                 val restored = Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, current)
-                val masterEnabled = Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+                val masterOn = Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
                 Thread.sleep(REBIND_SETTLE_MS)
                 val enabledAfter = CopyAccessibilityService.isSelfEnabled(context)
                 RemoteLog.i(
                     TAG,
-                    "force rebind via secure settings removed=$removed restored=$restored " +
-                        "masterEnabled=$masterEnabled enabledAfter=$enabledAfter " +
+                    "force rebind via secure settings masterOff=$masterOff removed=$removed " +
+                        "restored=$restored masterOn=$masterOn enabledAfter=$enabledAfter " +
                         "emptiedList=${withoutRaw.isBlank()} elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
                 )
                 // 写入成功 + 服务确实回到了启用列表，才算这次重绑动作生效。
                 // 真正"是否绑上"由调用方 awaitInstance 判定（设置生效是异步的）。
-                removed && restored && enabledAfter
+                masterOff && removed && restored && masterOn && enabledAfter
             } else {
-                // 一条 su 命令内完成摘除→等待→挂回→开总开关，避免多次弹 su。
+                // 一条 su 命令内完成 关总开关→摘除→挂回→开总开关，避免多次弹 su。
                 // 注意：这里不能用 `&&` 串联——settings put 偶发返回非 0 会中断整条链，
-                // 导致"摘掉没挂回"，服务被永久关闭。改用 `;` 保证每一步都执行。
-                val script = "settings put secure enabled_accessibility_services '$without'; sleep 0.7; " +
+                // 导致"摘掉没挂回"或"总开关停在 0"，服务被永久关闭。改用 `;` 保证每一步都执行。
+                val script = "settings put secure accessibility_enabled 0; sleep 0.5; " +
+                    "settings put secure enabled_accessibility_services '$without'; sleep 0.7; " +
                     "settings put secure enabled_accessibility_services '$current'; " +
                     "settings put secure accessibility_enabled 1"
-                val suSucceeded = runSu(script, timeoutMs = 15_000)
+                val suSucceeded = runSu(script, timeoutMs = 20_000)
                 Thread.sleep(REBIND_SETTLE_MS)
                 val enabledAfter = CopyAccessibilityService.isSelfEnabled(context)
                 RemoteLog.i(
@@ -207,7 +221,7 @@ object RootKeeper {
             }
         } catch (e: Exception) {
             RemoteLog.e(TAG, "force rebind failed elapsed=${SystemClock.elapsedRealtime() - startedAt}ms", e)
-            // 兜底：确保服务没有被我们留在"已摘除"状态
+            // 兜底：确保服务没有被我们留在"已摘除 / 总开关关闭"状态
             runCatching {
                 Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, current)
                 Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)

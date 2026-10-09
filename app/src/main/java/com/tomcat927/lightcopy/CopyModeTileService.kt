@@ -27,8 +27,11 @@ class CopyModeTileService : TileService() {
 
         /** 系统写回设置后 bind 服务通常在几百毫秒内，这里等最多 3 秒 */
         private const val BIND_WAIT_MS = 3_000L
-        /** 强制重绑后的等待稍微放宽 */
-        private const val BIND_WAIT_LONG_MS = 5_000L
+        /**
+         * 强制重绑后的等待。重绑内部要走「关总开关 800ms → 摘除 700ms → settle 1200ms」
+         * 再加上系统异步 bind 的时间，5 秒偏紧，放宽到 8 秒。
+         */
+        private const val BIND_WAIT_LONG_MS = 8_000L
         private const val BIND_POLL_MS = 100L
         /** 重绑最多尝试轮数：系统 bind 异步且可能被 ROM 节流，一次不成很常见 */
         private const val REBIND_MAX_ATTEMPTS = 2
@@ -175,10 +178,14 @@ class CopyModeTileService : TileService() {
         val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                startActivityAndCollapse(
-                    PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
-                )
+            // startActivityAndCollapse(PendingIntent) 是 API 34 才新增的重载。
+            // 之前误判成 API 31（Build.VERSION_CODES.S）可用，导致 Android 13 设备上
+            // 抛 NoSuchMethodError（见 10-09 15:25 日志）。这里严格按 34 分流，
+            // 且用反射调用以防在旧 SDK 上被编译期内联/校验拒绝。
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                val pi = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+                val m = TileService::class.java.getMethod("startActivityAndCollapse", PendingIntent::class.java)
+                m.invoke(this, pi)
             } else {
                 @Suppress("DEPRECATION")
                 startActivityAndCollapse(intent)
