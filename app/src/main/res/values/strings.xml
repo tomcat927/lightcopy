@@ -8,6 +8,7 @@
     <string name="a11y_service_description">轻复制的核心服务：读取当前屏幕上的文本并显示为可点击的文本块，点按即可复制到剪贴板。不截屏、不上传任何数据（仅「检查更新」时联网访问 GitHub）。</string>
 
     <string name="btn_copy_all">复制全部</string>
+    <string name="btn_copy_selected">复制(%1$d)</string>
     <string name="btn_close">关闭</string>
 
     <string name="toast_copied">已复制：%1$s</string>

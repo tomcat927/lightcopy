@@ -25,6 +25,12 @@ import androidx.core.view.WindowInsetsCompat
 /**
  * 复制模式悬浮层：全屏直触窗口（不设 FLAG_NOT_FOCUSABLE，可收返回键）。
  *
+ * 交互模式（多选）：
+ * - 点击文字块 → 切换选中状态（不退出），选中块用高亮色标记
+ * - 再次点击选中块 → 取消选中
+ * - 点击「复制」→ 复制所有选中块（无选中则复制全部），然后退出
+ * - 点击空白处 → 退出
+ *
  * 坐标约定：TextBlock.bounds 是屏幕坐标，绘制时用 getLocationOnScreen 求偏移换算到视图坐标
  * （不手算状态栏高度）；命中测试直接用 event.rawX/rawY 对屏幕坐标，两套坐标天然一致。
  */
@@ -42,8 +48,11 @@ class CopyModeOverlay(
         private const val SCRIM_COLOR = 0x4D000000
         private const val BLOCK_FILL_COLOR = 0x33FFFFFF
         private val BLOCK_STROKE_COLOR = 0xE600796B.toInt()
+        private const val SELECTED_FILL_COLOR = 0x6600796B
+        private val SELECTED_STROKE_COLOR = 0xFF00796B.toInt()
         private val TOOLBAR_BG_COLOR = 0xE6212124.toInt()
         private const val BUTTON_BG_COLOR = 0x33FFFFFF
+        private const val COPY_BUTTON_BG_COLOR = 0xFF00796B.toInt()
     }
 
     private val density = resources.displayMetrics.density
@@ -63,11 +72,22 @@ class CopyModeOverlay(
         style = Paint.Style.STROKE
         strokeWidth = dp(2f)
     }
+    private val selectedFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = SELECTED_FILL_COLOR
+        style = Paint.Style.FILL
+    }
+    private val selectedStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = SELECTED_STROKE_COLOR
+        style = Paint.Style.STROKE
+        strokeWidth = dp(2.5f)
+    }
 
     /** 与 blocks 一一对应的视图坐标矩形 */
     private var localRects: List<RectF> = emptyList()
     private var downHitIndex = -1
+    private val selectedIndices = mutableSetOf<Int>()
     private lateinit var toolbar: LinearLayout
+    private lateinit var copyButton: TextView
 
     private val timeoutHandler = Handler(Looper.getMainLooper())
     private val timeoutRunnable = Runnable {
@@ -88,17 +108,14 @@ class CopyModeOverlay(
         setWillNotDraw(false)
         importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
 
-        // 熄屏兜底退出
         ContextCompat.registerReceiver(
             context, screenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF),
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
-        // 30 秒超时兜底退出
         timeoutHandler.postDelayed(timeoutRunnable, TIMEOUT_MS)
 
         buildToolbar()
 
-        // 工具条避开手势条/导航栏
         ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
             val bars = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
@@ -122,12 +139,12 @@ class CopyModeOverlay(
                 cornerRadius = dp(16f)
             }
         }
-        toolbar.addView(
-            makeBarButton(context.getString(R.string.btn_copy_all)) {
-                onCopyAll(blocks.joinToString("\n") { it.text }, blocks.size)
-            },
-            linearWeight(1f),
-        )
+        copyButton = makeBarButton(context.getString(R.string.btn_copy_all)) {
+            val targets = if (selectedIndices.isEmpty()) blocks.toList()
+                          else selectedIndices.map { blocks[it] }
+            onCopyAll(targets.joinToString("\n") { it.text }, targets.size)
+        }
+        toolbar.addView(copyButton, linearWeight(1f))
         toolbar.addView(
             makeBarButton(context.getString(R.string.btn_close)) { onDismiss() },
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
@@ -165,6 +182,15 @@ class CopyModeOverlay(
     private fun linearWeight(weight: Float) =
         LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, weight)
 
+    /** 更新复制按钮文字：显示选中数量 */
+    private fun updateCopyButtonText() {
+        val cnt = selectedIndices.size
+        copyButton.text = if (cnt > 0)
+            context.getString(R.string.btn_copy_selected, cnt)
+        else
+            context.getString(R.string.btn_copy_all)
+    }
+
     override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
         super.onLayout(changed, l, t, r, b)
         val location = IntArray(2)
@@ -197,9 +223,15 @@ class CopyModeOverlay(
             RemoteLog.w(TAG, "overlay: onDraw with empty localRects, blocks=${blocks.size}")
             return
         }
-        for (rect in localRects) {
-            canvas.drawRoundRect(rect, cornerRadius, cornerRadius, fillPaint)
-            canvas.drawRoundRect(rect, cornerRadius, cornerRadius, strokePaint)
+        for (i in localRects.indices) {
+            val rect = localRects[i]
+            if (i in selectedIndices) {
+                canvas.drawRoundRect(rect, cornerRadius, cornerRadius, selectedFillPaint)
+                canvas.drawRoundRect(rect, cornerRadius, cornerRadius, selectedStrokePaint)
+            } else {
+                canvas.drawRoundRect(rect, cornerRadius, cornerRadius, fillPaint)
+                canvas.drawRoundRect(rect, cornerRadius, cornerRadius, strokePaint)
+            }
         }
     }
 
@@ -214,12 +246,17 @@ class CopyModeOverlay(
                 downHitIndex = -1
                 val up = hitTest(event.rawX, event.rawY)
                 when {
-                    // 同一块上按下并抬起 → 复制该块
                     down >= 0 && up == down -> {
-                        RemoteLog.d(TAG, "overlay: 点块复制 ${blocks[down].text.length} chars")
-                        onCopy(blocks[down].text)
+                        if (up in selectedIndices) {
+                            selectedIndices.remove(up)
+                            RemoteLog.d(TAG, "overlay: 取消选中块 #$up (共${selectedIndices.size}块)")
+                        } else {
+                            selectedIndices.add(up)
+                            RemoteLog.d(TAG, "overlay: 选中块 #$up (共${selectedIndices.size}块)")
+                        }
+                        updateCopyButtonText()
+                        invalidate()
                     }
-                    // 空白点击（按下抬起都未命中）→ 退出
                     down < 0 && up < 0 -> {
                         RemoteLog.d(TAG, "overlay: 空白点击退出")
                         onDismiss()
