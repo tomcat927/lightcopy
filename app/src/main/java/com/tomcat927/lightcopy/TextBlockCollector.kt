@@ -166,15 +166,17 @@ object TextBlockCollector {
     }
 
     /**
-     * 去重第二道：某块矩形完全包含面积更小的另一块 → 丢弃祖先，保留最小文本块
-     * （父容器带 contentDescription、父子文本重复的常见情况）
+     * 去重第二道：某块矩形完全包含面积更小的另一块 → 丢弃此块（它是祖先容器），
+     * 保留更小的子块（子块才是用户真正想复制的文字）。
+     * 典型场景：Launcher 的 workspace 容器 contentDescription 覆盖全屏，
+     * 子节点才是各 App 名字。不动此逻辑会把全屏大块留下、App 名字全丢掉。
      */
     private fun dropAncestors(blocks: List<TextBlock>): List<TextBlock> =
         blocks.filter { block ->
             blocks.none { other ->
                 other !== block &&
-                    other.bounds.contains(block.bounds) &&
-                    area(other.bounds) > area(block.bounds)
+                    block.bounds.contains(other.bounds) &&
+                    area(block.bounds) > area(other.bounds)
             }
         }
 
