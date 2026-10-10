@@ -70,12 +70,13 @@ class CopyModeTileService : TileService() {
         Thread({
             val startedAt = SystemClock.elapsedRealtime()
             try {
-                // === 方案 C：只检测 + 引导，绝不写设置、绝不重绑 ===
-                // 原因：本 ROM 上每次写 `enabled_accessibility_services` 都会触发一次新的 bind，
-                // 而 bind 要走「添加窗口」，被窗口事务（尤其 QS 面板动画、App 冷启动闪屏）打断后
-                // 就永久停在 `Binding services`。实测重绑次数与卡死次数正相关、与服务真正连通负相关。
-                // 因此这里不再尝试"自动修复"，只判断状态并引导用户手动关/开一次
-                // （这是 AutoJS6 等成熟实现验证过的唯一稳定做法）。
+                // 服务未绑上时先检测状态：
+                // - NOT_ENABLED → 用 root 一次性追加到 enabled 列表（像 AutoJs6 那样保留其他服务），
+                //   系统收到设置变更后自然发起 bind，不再需要用户手动去系统设置开。
+                // - ENABLED_ONLY → 已在列表但没绑上，写设置无意义（值已经对了），
+                //   只等待系统 bind，绑不上再引导用户手动关/开。
+                // - BOUND → 直接进入复制模式。
+                // 绝不做 forceRebind（摘除→挂回）——那制造两次 bind 请求，在本 ROM 上会卡死。
                 val state = RootKeeper.checkBinding(appContext)
                 RemoteLog.i(
                     TAG,
@@ -92,6 +93,17 @@ class CopyModeTileService : TileService() {
                         }
                         return@Thread
                     }
+                }
+
+                // NOT_ENABLED：一次性 root 写入（追加到 enabled 列表）。
+                if (state == RootKeeper.BindingCheck.NOT_ENABLED) {
+                    RemoteLog.i(TAG, "tile: service not enabled, one-time root write")
+                    val written = RootKeeper.ensureServiceEnabled(appContext, suTimeoutMs = 15_000)
+                    RemoteLog.i(
+                        TAG,
+                        "tile: one-time write result=$written " +
+                            "elapsed=${SystemClock.elapsedRealtime() - startedAt}ms",
+                    )
                 }
 
                 // 未绑上：给系统一点点时间（刚开机/刚更新后的首次 bind 可能正在路上），

@@ -108,7 +108,9 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // 保活开启时，打开 app 顺带检测一次绑定状态（方案 C：只检测，不写设置、不重绑）。
+            // 保活开启时，打开 app 顺带检测一次绑定状态。
+            // recoverOrGuide 现在会在服务不在 enabled 列表时一次性写入（像 AutoJs6），
+            // 但不做 forceRebind（摘除→挂回）。延迟 6 秒确保窗口事务结束后再操作。
             if (RootKeeper.isKeepAliveOn(this@MainActivity)) {
                 // 推迟到窗口事务结束后（延迟 6 秒）：Activity 刚显示时启动闪屏正在销毁，
                 // 若此刻去写设置会触发一次与窗口事务撞车的 bind，撞上就永久卡 `Binding services`。
@@ -155,9 +157,8 @@ class MainActivity : ComponentActivity() {
                             if (granted) {
                                 keepAliveOn = true
                                 RootKeeper.setKeepAliveOn(appContext, true)
-                                // 方案 C：开启保活后只做一次绑定状态检测（不写设置、不重绑）。
-                                // 重绑被证明是卡死的成因，故不再随开关自动执行；
-                                // 需要时可在「主动重绑」开关里单独开启（默认关）。
+                                // 方案 C 闸门已移除：recoverOrGuide 现在会一次性写入（追加到 enabled 列表），
+                                // 但不做 forceRebind（摘除→挂回）。forceRebind 仍受「强制重绑」开关控制（默认关）。
                                 val bound = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                                     RootKeeper.recoverOrGuide(appContext)
                                 }

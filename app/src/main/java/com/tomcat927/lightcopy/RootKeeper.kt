@@ -20,7 +20,12 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Root 保活：无障碍服务本就由系统 bind 常驻，真正会丢的是「开关状态」，
- * 所以保活 = 检测到开关被关 → 把两个 secure 设置写回来（合并追加，绝不覆盖踢掉其他服务）。
+ * 所以保活 = 检测到服务不在 enabled 列表 → 一次性追加写回（保留其他服务，绝不覆盖踢掉）。
+ *
+ * 核心区分（10-10 源码比对修正）：
+ * - 一次性写入（ensureServiceEnabled）：追加自身到 enabled 列表，写一次即返回。安全。
+ * - 强制重绑（forceRebind）：摘除→挂回，制造两次 bind 请求，在本 ROM 上会卡死。
+ *   受 active_rebind_on 开关拦截，默认关。
  *
  * 恢复双后端：adb 一次性授予的 WRITE_SECURE_SETTINGS 优先（免弹 su），否则走 su shell。
  * 覆盖面：应用内存活时的各种关闭（ROM 主动关/服务解绑）。
@@ -36,26 +41,26 @@ object RootKeeper {
     private const val WORK_ONE_SHOT = "root_keepalive_once"
 
     /**
-     * 「主动重绑」总开关 —— **默认关**。
+     * 「强制重绑」总开关 —— **默认关**。
      *
-     * === 为什么要把它关掉（10-09 实证结论）===
-     * 本项目自创的「反复写 `enabled_accessibility_services` + 强制重绑 + 保活」整套逻辑，
-     * 经过 18 份远程日志比对后被判定为**毒药而非解药**：
+     * === 区分「一次性写入」与「反复重绑」（10-10 源码比对修正）===
+     * 10-09 的结论把 AutoJs6 描述为「从不写 `ENABLED_ACCESSIBILITY_SERVICES`」，这是看错了文件：
+     * `AccessibilityServiceUtils.kt` 确实只读，但真正的启用逻辑在 `AccessibilityTool.kt`。
+     * AutoJs6 在用户点 App 内开关时**确实写了** `enabled_accessibility_services`（root shell），
+     * 但它只写一次（追加自身、保留其他服务），从不在后台循环里反复摘除/挂回。
+     *
+     * 真正的毒药不是「写设置」，是**反复写 + 摘除→挂回**制造多次 bind 请求：
      *   - 唯一两次服务真正 `connected` 的日志（13:56、17:07）里，重绑次数均为 **0**；
      *   - 而重绑 12 次的日志卡 `Binding services` 16 次、重绑 5 次的日志卡 24 次。
-     *   相关性 100%：**每次「摘除→挂回」都在制造一次新的 bind 请求，而本 ROM 的
+     *   相关性 100%：每次「摘除→挂回」都在制造一次新的 bind 请求，而本 ROM 的
      *   `AccessibilityManagerService` 绑定要走「添加窗口」并等客户端响应，
-     *   一旦被进程的窗口事务打断，该次 bind 就永久停在 `Binding services`。**
-     *   写设置越勤 → 制造越多 bind → 卡死的概率越高。
-     *
-     * 对照成熟开源实现 `SuperMonster003/AutoJs6`：其 `AccessibilityServiceUtils.kt`
-     * **只读设置、只引导用户去系统设置手动开启，从不写 `ENABLED_ACCESSIBILITY_SERVICES`、
-     * 从不重绑** —— 服务照样长期稳定。这证明「系统自然绑定」才是正路。
+     *   一旦被进程的窗口事务打断，该次 bind 就永久停在 `Binding services`。
      *
      * === 本开关的语义 ===
-     * 关闭（默认）时：所有恢复路径**一律不写任何 `Settings.Secure`、不重绑**，
-     *   只做「检测 + 引导用户去系统设置手动关/开一次」。
-     * 打开时：恢复原有自动重绑行为（保留代码本体，便于日后按方案 B 精细化后回退）。
+     * 关闭（默认）时：[ensureServiceEnabled] 照常执行一次性写入（追加到 enabled 列表），
+     *   但 [forceRebind]（摘除→挂回）和 [resetProcessForRebind]（杀进程）被拦截。
+     *   这与 AutoJs6 对齐：用户主动触发时写一次，系统自然 bind。
+     * 打开时：允许 [forceRebind] / [resetProcessForRebind]（实验性，可能加剧卡死）。
      */
     private const val KEY_REBIND_ON = "active_rebind_on"
 
@@ -120,23 +125,20 @@ object RootKeeper {
     }
 
     /**
-     * 恢复无障碍服务（已开启则原样返回 true）。
+     * 一次性启用无障碍服务（已启用则原样返回 true）。
+     *
+     * 服务不在 enabled 列表时**追加**自身（保留其他服务），写一次即返回。
+     * 这与 AutoJs6 的 `startServiceWithRoot()` 一致：用户主动触发时写一次，
+     * 系统收到设置变更后自然发起 bind。
+     *
+     * 注意：这里只做「追加」，不做「摘除→挂回」——后者（[forceRebind]）才会制造
+     * 多次 bind 请求导致卡死，受 [KEY_REBIND_ON] 开关拦截。
+     *
      * READ/WRITE 走 secure 设置；有 WRITE_SECURE_SETTINGS 用 Java 层写，
      * 没有就用一次 su 调用带两条 settings 命令（减少弹窗与管理器日志噪音）。
      * suTimeoutMs：首次授权要等用户在管理器里点「允许」，调用方可放宽（如瓦片路径 15 秒）。
      */
     fun ensureServiceEnabled(context: Context, suTimeoutMs: Long = 5_000L): Boolean {
-        // 方案 C 闸门：主动重绑关闭（默认）时，**绝不写 Settings.Secure**。
-        // 写设置本身就是制造一次 bind 请求，正是卡死态的成因。
-        if (!isActiveRebindOn(context)) {
-            val enabled = CopyAccessibilityService.isSelfEnabled(context)
-            RemoteLog.w(
-                TAG,
-                "enable service: SKIPPED (active-rebind OFF, default) — no settings write. " +
-                    "isSelfEnabled=$enabled instance=${CopyAccessibilityService.instance != null}",
-            )
-            return enabled
-        }
         val startedAt = SystemClock.elapsedRealtime()
         if (CopyAccessibilityService.isSelfEnabled(context)) {
             RemoteLog.d(TAG, "enable service: already enabled")
@@ -610,27 +612,54 @@ object RootKeeper {
             .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
 
     /**
-     * 保活/瓦片/Worker 的统一恢复入口（方案 C 版）。
+     * 保活/瓦片/Worker 的统一恢复入口。
      *
      * 语义：
      *   - 已绑上 → 直接 true。
-     *   - 「主动重绑」开关**关**（默认）→ **不碰设置**，只检测并记录状态，返回是否已绑定。
-     *     调用方据此提示用户手动去系统设置关/开一次（这是唯一被证明有效的恢复方式）。
-     *   - 「主动重绑」开关**开** → 回退到旧的 [recoverBindingWhenIdle] 行为。
+     *   - 服务不在 enabled 列表 → **一次性写入**（追加，保留其他服务），等系统 bind。
+     *   - 服务在列表但没绑上（停滞态）且「强制重绑」开关**关**（默认）→ **不碰设置**，
+     *     只记录状态，返回 false。调用方据此提示用户手动去系统设置关/开一次。
+     *   - 「强制重绑」开关**开** → 回退到 [recoverBindingWhenIdle]（摘除→挂回 + 进程杀）。
+     *
+     * 与旧版方案 C 的区别：方案 C 连一次性写入也堵死了，导致服务永远进不了 enabled 列表。
+     * 现在允许 [ensureServiceEnabled] 照常执行（只写一次），只拦截 [forceRebind]。
      *
      * @return true = 当前已拿到服务实例
      */
     fun recoverOrGuide(context: Context): Boolean {
         if (CopyAccessibilityService.instance != null) return true
+
+        // Step 1: 服务不在 enabled 列表 → 一次性追加写入（像 AutoJs6 那样保留其他服务）。
+        if (!CopyAccessibilityService.isSelfEnabled(context)) {
+            RemoteLog.i(TAG, "recoverOrGuide: service not enabled, one-time write")
+            if (!ensureServiceEnabled(context)) {
+                RemoteLog.w(TAG, "recoverOrGuide: one-time write failed, need user action")
+                return false
+            }
+        }
+
+        // Step 2: 等待系统 bind。
+        val bound = awaitInstance(BIND_VERIFY_TIMEOUT_MS)
+        if (bound != null) {
+            RemoteLog.i(TAG, "recoverOrGuide: bound after enable")
+            return true
+        }
+
+        // Step 3: 已在 enabled 列表但没绑上（停滞态）。
+        // 「强制重绑」开关关（默认）时：不做摘除/挂回、不杀进程。
+        // 原因：forceRebind 的「摘除→挂回」制造两次新 bind 请求，
+        // 在本 ROM 上被窗口事务打断后永久停在 Binding services。
         if (!isActiveRebindOn(context)) {
             val state = checkBinding(context)
             RemoteLog.w(
                 TAG,
-                "recoverOrGuide: active-rebind OFF (default) → no settings write, no rebind. " +
-                    "state=$state needUserManualToggle=${state != BindingCheck.BOUND}",
+                "recoverOrGuide: enabled but not bound, state=$state, " +
+                    "not forcing rebind (active-rebind OFF, default)",
             )
             return false
         }
+
+        // 「强制重绑」开关开 → 升级到 forceRebind + 进程杀。
         RemoteLog.i(TAG, "recoverOrGuide: active-rebind ON → delegating to recoverBindingWhenIdle")
         return recoverBindingWhenIdle(context)
     }
@@ -749,9 +778,9 @@ class KeepAliveWorker(
         if (now - prefs.getLong("last_recovery_ms", 0) < 30_000L) return Result.success()
 
         // Worker 是最理想的恢复时机：纯后台、无任何窗口事务。
-        // 但在方案 C 下（主动重绑默认关），它**只检测、不写设置**：
-        // 写设置/重绑本身就是制造卡死 bind 的元凶，而后台 Worker 又无法提示用户，
-        // 所以这里只留下状态诊断日志，具体引导交由用户可见的路径（MainActivity / 瓦片）。
+        // recoverOrGuide 会在服务不在 enabled 列表时一次性写入（追加，保留其他服务），
+        // 但不做 forceRebind（摘除→挂回）——那制造多次 bind 请求会卡死。
+        // 后台无法提示用户，所以如果服务已启用但没绑上，只留日志，引导交由用户可见路径。
         val recovered = withContext(Dispatchers.IO) {
             RootKeeper.recoverOrGuide(context)
         }
