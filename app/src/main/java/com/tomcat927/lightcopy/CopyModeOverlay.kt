@@ -39,9 +39,9 @@ class CopyModeOverlay(
     companion object {
         private const val TAG = "LightCopy"
         private const val TIMEOUT_MS = 30_000L
-        private const val SCRIM_COLOR = 0x28000000
-        private const val BLOCK_FILL_COLOR = 0x18FFFFFF
-        private const val BLOCK_STROKE_COLOR = 0x44FFFFFF
+        private const val SCRIM_COLOR = 0x4D000000
+        private const val BLOCK_FILL_COLOR = 0x33FFFFFF
+        private val BLOCK_STROKE_COLOR = 0xCCFFFFFF.toInt()
         private val TOOLBAR_BG_COLOR = 0xE6212124.toInt()
         private const val BUTTON_BG_COLOR = 0x33FFFFFF
     }
@@ -179,11 +179,24 @@ class CopyModeOverlay(
                 block.bounds.bottom - offsetY,
             )
         }
+        if (changed && localRects.isNotEmpty()) {
+            val first = localRects[0]
+            RemoteLog.d(
+                TAG,
+                "overlay: onLayout offset=($offsetX,$offsetY) " +
+                    "blocks=${localRects.size} firstRect=($first) " +
+                    "viewSize=${(r - l)}x${(b - t)}",
+            )
+        }
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         canvas.drawColor(SCRIM_COLOR)
+        if (localRects.isEmpty()) {
+            RemoteLog.w(TAG, "overlay: onDraw with empty localRects, blocks=${blocks.size}")
+            return
+        }
         for (rect in localRects) {
             canvas.drawRoundRect(rect, cornerRadius, cornerRadius, fillPaint)
             canvas.drawRoundRect(rect, cornerRadius, cornerRadius, strokePaint)
