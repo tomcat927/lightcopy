@@ -7,6 +7,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -210,19 +211,31 @@ class CopyAccessibilityService : AccessibilityService() {
      * 采集到的"屏幕文字"其实是通知栏自己的一堆短文本（实测 roots=[com.android.systemui]），
      * 底下的真实页面文字根本采不到 → 选择模式形同虚设。
      *
-     * 为什么用 `performGlobalAction(GLOBAL_ACTION_BACK)`：
-     * - 由系统执行，**不创建任何窗口**（瓦片里若造窗口会令无障碍绑定卡死，已踩过坑）；
-     * - 无障碍服务已绑定时即可用，权限足够；
-     * - 比 `ACTION_CLOSE_SYSTEM_DIALOGS` 广播可靠（该广播自 Android 12 起受限）。
+     * 为什么用 `GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE`（API 30+）而非 `GLOBAL_ACTION_BACK`：
+     * - BACK 会把底层 Activity 也退一层（实测在 QS 面板展开时点瓦片，BACK 收起面板后
+     *   Settings 也被退掉、回到了桌面，roots=[com.android.launcher3]，采集到 0 块）。
+     * - `DISMISS_NOTIFICATION_SHADE` 只关闭通知栏/QS 面板，不向底层 Activity 发 BACK，
+     *   底层页面保持原位，采集到的就是真实页面文字。
+     * - 不创建任何窗口（瓦片里若造窗口会令无障碍绑定卡死，已踩过坑）。
+     * - 低版本回落到 BACK（设备 < API 30 时）。
      *
      * 注意返回值只表示"收起动作已派发成功"，不代表面板已完全收起 —— 收拢是异步动画。
      * 因此调用方仍需等 [SHADE_COLLAPSE_WAIT_MS]，并由采集侧的 SystemUI 排除 + 重试兜底。
      */
     private fun collapseShade(): Boolean {
-        val ok = runCatching { performGlobalAction(GLOBAL_ACTION_BACK) }
-            .onFailure { RemoteLog.w(TAG, "collapse shade: global back failed", it) }
-            .getOrDefault(false)
-        RemoteLog.d(TAG, "collapse shade: global back dispatched=$ok")
+        var ok = false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            ok = runCatching { performGlobalAction(GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE) }
+                .onFailure { RemoteLog.w(TAG, "collapse shade: DISMISS_NOTIFICATION_SHADE failed", it) }
+                .getOrDefault(false)
+            RemoteLog.d(TAG, "collapse shade: DISMISS_NOTIFICATION_SHADE dispatched=$ok")
+        }
+        if (!ok) {
+            ok = runCatching { performGlobalAction(GLOBAL_ACTION_BACK) }
+                .onFailure { RemoteLog.w(TAG, "collapse shade: global back failed", it) }
+                .getOrDefault(false)
+            RemoteLog.d(TAG, "collapse shade: global back fallback dispatched=$ok")
+        }
         return ok
     }
 
