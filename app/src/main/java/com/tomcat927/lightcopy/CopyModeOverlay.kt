@@ -41,7 +41,7 @@ class CopyModeOverlay(
         private const val TIMEOUT_MS = 30_000L
         private const val SCRIM_COLOR = 0x4D000000
         private const val BLOCK_FILL_COLOR = 0x33FFFFFF
-        private val BLOCK_STROKE_COLOR = 0xCCFFFFFF.toInt()
+        private val BLOCK_STROKE_COLOR = 0xE600796B.toInt()
         private val TOOLBAR_BG_COLOR = 0xE6212124.toInt()
         private const val BUTTON_BG_COLOR = 0x33FFFFFF
     }
@@ -61,7 +61,7 @@ class CopyModeOverlay(
     private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = BLOCK_STROKE_COLOR
         style = Paint.Style.STROKE
-        strokeWidth = dp(1f)
+        strokeWidth = dp(2f)
     }
 
     /** 与 blocks 一一对应的视图坐标矩形 */
